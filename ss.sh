@@ -1,346 +1,196 @@
 #!/bin/bash
-# Author: LivisSnack<https://livissnack.com>
+# =================================================================
+# Script Name: Shadowsocks-Rust 多节点版
+# Author:      LivisSnack <https://livissnack.com>
+# Description: 基于高效的 Rust 版本，支持单机多端口同时运行
+# =================================================================
 
+# --- 基础配置 ---
 RED="\033[31m"
 GREEN="\033[32m"
 YELLOW="\033[33m"
 BLUE="\033[36m"
 PLAIN='\033[0m'
 
-IP4=`curl -sL -4 ip.sb`
-CPU=`uname -m`
+IP4=$(curl -sL -4 ip.sb || echo "127.0.0.1")
+CPU_ARCH=$(uname -m)
+# Rust 版推荐的现代加密方式
+CIPHER_LIST=(aes-256-gcm aes-128-gcm chacha20-ietf-poly1305)
 
-colorEcho() {
-    echo -e "${1}${@:2}${PLAIN}"
+log_info()    { echo -e "${GREEN}[✔]${PLAIN} ${1}"; }
+log_warn()    { echo -e "${YELLOW}[!]${PLAIN} ${1}"; }
+log_error()   { echo -e "${RED}[✘]${PLAIN} ${1}"; }
+log_step()    { echo -e "${BLUE}==>${PLAIN} ${1}"; }
+
+# --- 环境检查 ---
+check_env() {
+    [[ $EUID -ne 0 ]] && log_error "请使用 root 权限运行" && exit 1
+    if [[ -n "$(command -v yum)" ]]; then OS="yum"; elif [[ -n "$(command -v apt)" ]]; then OS="apt"; elif [[ -n "$(command -v apk)" ]]; then OS="apk"; else log_error "不支持的系统"; exit 1; fi
 }
 
-cipher=(
-AEAD_AES_256_GCM
-AEAD_AES_128_GCM
-AEAD_CHACHA20_POLY1305
-)
-
-ArchAffix(){
-    if [[ "$CPU" = "x86_64" ]] || [[ "$CPU" = "amd64" ]]; then
-	  CPU="amd64"
-	  ARCH="x86_64"
-    elif [[ "$CPU" = "armv8" ]] || [[ "$CPU" = "aarch64" ]]; then
-	  CPU="arm64"
-	  ARCH="aarch64"
-    else
-	  colorEcho $RED " 不支持的CPU架构！"
-    fi
+# --- 架构适配 (Shadowsocks-Rust 命名规范) ---
+get_arch() {
+    case "$CPU_ARCH" in
+        x86_64|amd64) ARCH="x86_64-unknown-linux-musl" ;;
+        aarch64|armv8) ARCH="aarch64-unknown-linux-musl" ;;
+        *) log_error "暂不支持的架构: $CPU_ARCH"; exit 1 ;;
+    esac
 }
 
-CheckSystem() {
-    result=$(id | awk '{print $1}')
-    if [[ $result != "uid=0(root)" ]]; then
-      result=$(id | awk '{print $1}')
-	  if [[ $result != "用户id=0(root)" ]]; then
-        colorEcho $RED " 请以root身份执行该脚本"
-        exit 1
-	  fi
-    fi
+# --- 核心程序下载 ---
+download_rust_bin() {
+    if [[ ! -f /usr/local/bin/ssserver ]]; then
+        log_step "正在下载 Shadowsocks-Rust 核心程序..."
+        get_arch
+        # 获取最新版本号并下载
+        local latest_ver=$(curl -s "https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+        [[ -z "$latest_ver" ]] && latest_ver="v1.18.3" # 备用版本号
 
-    res=`which yum 2>/dev/null`
-    if [[ "$?" != "0" ]]; then
-      res=`which apt 2>/dev/null`
-      if [[ "$?" != "0" ]]; then
-        res=`which apk 2>/dev/null`
-        if [[ "$?" != "0" ]]; then
-          colorEcho $RED " 不受支持的Linux系统"
-          exit 1
-		fi
-		OS="apk"
-      else
-	    OS="apt"
-	  fi
-    else
-	  OS="yum"
-    fi
-    if [[ ${OS} == "apk" ]]; then
-      config="/etc/init.d/ss"
-    else
-      config="/etc/systemd/system/ss.service"
-    fi
-    res=`which systemctl 2>/dev/null`
-    if [[ "$?" != "0" ]]; then
-	  res=`which rc-service 2>/dev/null`
-	  if [[ "$?" != "0" ]]; then
-        colorEcho $RED " 系统版本过低，请升级到最新版本"
-        exit 1
-	  fi
+        local url="https://github.com/shadowsocks/shadowsocks-rust/releases/download/${latest_ver}/shadowsocks-${latest_ver}.${ARCH}.tar.xz"
+
+        wget -qO ss.tar.xz "$url"
+        tar -xJf ss.tar.xz -C /usr/local/bin/ ssserver ssurl
+        chmod +x /usr/local/bin/ssserver /usr/local/bin/ssurl
+        rm -f ss.tar.xz
+        log_info "核心程序安装成功 (Version: $latest_ver)"
     fi
 }
 
-Dependency(){
-    if [[ ${OS} == "yum" ]]; then
-	  echo ""
-	  colorEcho $YELLOW "安装依赖中..."
-	  yum install wget -y >/dev/null 2>&1
-	  echo ""
-    elif [[ ${OS} == "apt" ]]; then
-	  echo ""
-	  colorEcho $YELLOW "安装依赖中..."
-	  apt install wget -y >/dev/null 2>&1
-	  echo ""
-    else
-	  echo ""
-	  colorEcho $YELLOW "安装依赖中..."
-	  apk add wget -y >/dev/null 2>&1
-	  echo ""
-    fi
-}
+# --- 添加新节点 ---
+install_node() {
+    log_step "开始添加新节点..."
+    download_rust_bin
 
-Selectcipher() {
-    for ((i=1;i<=${#cipher[@]};i++ )); do
- 	  hint="${cipher[$i-1]}"
- 	  echo -e "${GREEN}${i}${PLAIN}) ${hint}"
+    # 端口检查
+    while true; do
+        read -p "请输入节点端口 [1-65535]: " PORT
+        if [[ ! "${PORT}" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+            log_error "无效端口！"
+        elif netstat -tuln | grep -q ":${PORT} "; then
+            log_warn "端口 ${PORT} 已被占用，请更换。"
+        else
+            break
+        fi
     done
-    read -p "请选择加密[1-3] (默认: ${cipher[0]}):" pick
-    [ -z "$pick" ] && pick=1
-    expr ${pick} + 1 &>/dev/null
-    if [ $? -ne 0 ]; then
-	  colorEcho $RED "错误, 请选择[1-3]"
-	  selectcipher
-    fi
-    if [[ "$pick" -lt 1 || "$pick" -gt ${#cipher[@]} ]]; then
-	  colorEcho $RED "错误, 请选择[1-3]"
-	  selectcipher
-    fi
-    cipher=${cipher[$pick-1]}
-    colorEcho $BLUE "加密: ${cipher}"
-    echo ""
-}
 
-Download() {
-    mkdir -p /etc/ss
-    rm -rf /etc/ss/shadowsocks
-    ArchAffix
-    DOWNLOAD_LINK="https://raw.githubusercontent.com/livissnack/Proxy/main/shadowsocks"
-    colorEcho $YELLOW "下载ShadowSocks: ${DOWNLOAD_LINK}"
-    curl -L -H "Cache-Control: no-cache" -o /etc/ss/shadowsocks ${DOWNLOAD_LINK}
-    chmod +x /etc/ss/shadowsocks
-}
+    # 加密与密码
+    echo -e "\n选择加密方式:"
+    for i in "${!CIPHER_LIST[@]}"; do echo -e " ${GREEN}$((i+1)).${PLAIN} ${CIPHER_LIST[$i]}"; done
+    read -p "选择 [1-3] (默认1): " pick
+    [[ -z "$pick" ]] && pick=1
+    CIPHER=${CIPHER_LIST[$((pick-1))]}
 
-Generate(){
-    Set_port
-    Selectcipher
-    Set_pass
-}
+    read -p "设置密码 (回车随机): " PASS
+    [[ -z "${PASS}" ]] && PASS=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 12)
 
-Deploy(){
+    # 部署 Systemd 服务 (Rust版建议使用配置文件或命令行)
+    # 为了方便多开，我们直接将配置嵌入命令行参数
     if [[ ${OS} == "apk" ]]; then
-      cat > /etc/init.d/ss<<-EOF
+        cat > /etc/init.d/ss-rust-${PORT} <<EOF
 #!/sbin/openrc-run
-
-name="ShadowSocks"
-command="/etc/ss/shadowsocks"
+command="/usr/local/bin/ssserver"
+command_args="-s 0.0.0.0:${PORT} -m ${CIPHER} -k ${PASS} -u"
 command_background=true
-command_args="-s 0.0.0.0:${PORT} -cipher ${cipher} -password ${PASS} -udp"
-pidfile="/run/${RC_SVCNAME}.pid"
-depend() {
-        need net
-        use dns logger netmount
-}
+pidfile="/run/\${RC_SVCNAME}.pid"
 EOF
-      chmod +x /etc/init.d/ss
-      service ss start
-      rc-update add ss
+        chmod +x /etc/init.d/ss-rust-${PORT}
+        rc-update add ss-rust-${PORT} && service ss-rust-${PORT} start
     else
-      cat > /etc/systemd/system/ss.service<<-EOF
+        cat > /etc/systemd/system/ss-rust-${PORT}.service <<EOF
 [Unit]
-Description=ShadowSocks
+Description=ShadowSocks-Rust Port ${PORT}
 After=network.target
-Wants=network.target
-StartLimitBurst=5
-StartLimitIntervalSec=500
 
 [Service]
 Type=simple
 User=root
-DynamicUser=true
-ExecStart=/etc/ss/shadowsocks -s 0.0.0.0:${PORT} -cipher ${cipher} -password ${PASS} -udp -tcpcork
-LimitNOFILE=1048576
-LimitNPROC=51200
-RestartSec=2s
+ExecStart=/usr/local/bin/ssserver -s 0.0.0.0:${PORT} -m ${CIPHER} -k ${PASS} -u
 Restart=on-failure
-StandardOutput=null
+LimitNOFILE=1048576
 
 [Install]
 WantedBy=multi-user.target
 EOF
-      systemctl daemon-reload
-      systemctl enable ss
-      systemctl restart ss
+        systemctl daemon-reload
+        systemctl enable ss-rust-${PORT} && systemctl restart ss-rust-${PORT}
     fi
+
+    log_info "Rust 节点 [端口 ${PORT}] 启动成功！"
+    generate_url "$PORT" "$CIPHER" "$PASS"
 }
 
-Set_port(){
-    read -p $'请输入 SS 端口 [1-65535]\n(默认: 6666，回车): ' PORT
-    [[ -z "${PORT}" ]] && PORT="6666"
-    echo $((${PORT}+0)) &>/dev/null
-    if [[ $? -eq 0 ]]; then
-	  if [[ ${PORT} -ge 1 ]] && [[ ${PORT} -le 65535 ]]; then
-		colorEcho $BLUE "端口: ${PORT}"
-		echo ""
-	  else
-		colorEcho $RED "输入错误, 请输入正确的端口。"
-		Set_port
-	  fi
-    else
-	  colorEcho $RED "输入错误, 请输入数字。"
-	  Set_port
+# --- 查看节点 ---
+list_nodes() {
+    log_step "当前运行中的 Rust 节点："
+    local files=$(ls /etc/systemd/system/ss-rust-*.service /etc/init.d/ss-rust-* 2>/dev/null)
+
+    if [[ -z "$files" ]]; then
+        log_warn "暂无运行中的节点。"
+        return
     fi
+
+    echo -e "${BLUE}--------------------------------------------------${PLAIN}"
+    for f in $files; do
+        local p=$(echo $f | grep -oP 'ss-rust-\K[0-9]+')
+        local m=$(grep -oP '(?<=-m )[^ ]+' $f)
+        local k=$(grep -oP '(?<=-k )[^ ]+' $f)
+        echo -e " 端口: ${GREEN}${p}${PLAIN} | 加密: ${YELLOW}${m}${PLAIN} | 密码: ${k}"
+    done
+    echo -e "${BLUE}--------------------------------------------------${PLAIN}"
 }
 
-Set_pass(){
-    read -p $'请输入 SS 密码\n(推荐随机生成，直接回车): ' PASS
-    [[ -z "${PASS}" ]] && PASS=`tr -dc A-Za-z0-9 </dev/urandom | head -c 12`
-    colorEcho $BLUE "PASS: ${PASS}"
-    echo ""
-}
+# --- 删除节点 ---
+delete_node() {
+    list_nodes
+    read -p "请输入要删除的节点端口: " P_DEL
+    [[ -z "$P_DEL" ]] && return
 
-Install(){
-    Dependency
-    Generate
-    Download
-    Deploy
-    colorEcho $BLUE "安装完成"
-    echo ""
-    ShowInfo
-}
-
-Restart(){
-    systemctl restart ss
-    colorEcho $BLUE " SS已启动"
-}
-
-Stop(){
-    systemctl stop ss
-    colorEcho $BLUE " SS已停止"
-}
-
-Uninstall(){
-    read -p $' 是否卸载SS？[y/n]\n (默认n, 回车): ' answer
-    if [[ "${answer}" = "y" ]]; then
-	  if [[ ${OS} == "apk" ]]; then
-	    rc-update del ss
-	    service ss stop
-	    rm -rf /etc/init.d/ss
-	  else
-	    systemctl stop ss
-	    systemctl disable ss >/dev/null 2>&1
-	    rm -rf /etc/systemd/system/ss.service
-	    systemctl daemon-reload
-	  fi
-	  rm -rf /etc/ss
-	  colorEcho $BLUE " SS已经卸载完毕"
-    else
-	  colorEcho $BLUE " 取消卸载"
-    fi
-}
-
-ShowInfo() {
-    if [[ ! -f ${config} ]]; then
-	  colorEcho $RED " SS未安装"
- 	  exit 1
-    fi
-    echo ""
-    echo -e " ${BLUE}SS配置文件: ${PLAIN} ${RED}${config}${PLAIN}"
-    colorEcho $BLUE " SS配置信息："
-    GetConfig
-    OutConfig
-    colorEcho $BLUE " SS节点链接："
-    OutConfigUrl
-}
-
-GetConfig() {
     if [[ ${OS} == "apk" ]]; then
-      port=`grep cipher ${config} | awk -F '=' '{print $2}' | cut -d: -f2 | cut -d- -f1`
-	  cipher=`grep cipher ${config} | awk -F '=' '{print $2}' | cut -d' ' -f4`
-      pass=`grep cipher ${config} | awk -F '=' '{print $2}' | cut -d' ' -f6`
+        service ss-rust-${P_DEL} stop && rc-update del ss-rust-${P_DEL}
+        rm -f /etc/init.d/ss-rust-${P_DEL}
     else
-      port=`grep cipher ${config} | awk -F '=' '{print $2}' | cut -d: -f2 | cut -d- -f1`
-	  cipher=`grep cipher ${config} | awk -F '=' '{print $2}' | cut -d' ' -f5`
-      pass=`grep cipher ${config} | awk -F '=' '{print $2}' | cut -d' ' -f7`
+        systemctl stop ss-rust-${P_DEL} && systemctl disable ss-rust-${P_DEL}
+        rm -f /etc/systemd/system/ss-rust-${P_DEL}.service
+        systemctl daemon-reload
     fi
+    log_info "节点 ${P_DEL} 已卸载。"
 }
 
-OutConfig() {
-    echo -e "   ${BLUE}协议: ${PLAIN} ${RED}ShadowSocks${PLAIN}"
-    echo -e "   ${BLUE}地址(IP): ${PLAIN} ${RED}${IP4}${PLAIN}"
-    echo -e "   ${BLUE}SS端口(PORT)：${PLAIN} ${RED}${port}${PLAIN}"
-    echo -e "   ${BLUE}SS加密：${CIPHER} ${RED}${cipher}${PLAIN}"
-    echo -e "   ${BLUE}SS密码(PASS)：${PLAIN} ${RED}${pass}${PLAIN}"
+# --- 生成链接 (使用 Rust 自带工具更标准) ---
+generate_url() {
+    local p=$1; local m=$2; local k=$3
+    # 使用 ssurl 工具生成官方格式链接
+    local url=$(/usr/local/bin/ssurl --encode "ss://${m}:${k}@${IP4}:${p}#SS-Rust-${p}")
+    echo -e " ${BLUE}节点链接:${PLAIN} ${RED}${url}${PLAIN}"
 }
 
-OutConfigUrl() {
-    local processed_cipher=${cipher#AEAD_}
-    processed_cipher=$(echo "$processed_cipher" | tr '[:upper:]' '[:lower:]')
-    local userinfo_base64=$(echo -n "${processed_cipher}:${pass}" | base64 | tr -d '\n' | tr '+/' '-_')
-    userinfo_base64=${userinfo_base64%=*}
-    local ss_url="ss://${userinfo_base64}@${IP4}:${port// /}#livissnack-ss-${IP4}"
-    echo -e "   ${BLUE}节点URL：${PLAIN} ${RED}${ss_url}${PLAIN}"
+# --- 菜单 ---
+main_menu() {
+    clear
+    echo -e "${BLUE}########################################${PLAIN}"
+    echo -e "${BLUE}#${PLAIN}    ${GREEN}Shadowsocks-Rust 多节点管理${PLAIN}      ${BLUE}#${PLAIN}"
+    echo -e "${BLUE}#${PLAIN}       内存占用更低 | 性能更强         ${BLUE}#${PLAIN}"
+    echo -e "${BLUE}########################################${PLAIN}"
+    echo " 1) 添加新节点"
+    echo " 2) 查看所有节点"
+    echo " 3) 删除指定节点"
+    echo " -----------------------"
+    echo " 4) 重启所有 Rust 节点"
+    echo " 0) 退出"
+    echo ""
+    read -p "选择操作: " num
+    case "$num" in
+        1) install_node ;;
+        2) list_nodes ;;
+        3) delete_node ;;
+        4)
+           if [[ ${OS} == "apk" ]]; then service ss-rust- restart; else systemctl restart "ss-rust-*"; fi
+           log_info "重启任务已提交"
+           ;;
+        0) exit 0 ;;
+        *) main_menu ;;
+    esac
 }
 
-ChangeConf(){
-    Generate
-    Deploy
-    colorEcho $BLUE " 修改配置成功"
-    ShowInfo
-}
-
-CheckSystem
-Menu() {
-	clear
-	echo "################################"
-	echo -e "#      ${RED}SS-GO一键安装脚本${PLAIN}       #"
-	echo -e "# ${GREEN}作者${PLAIN}: 乐言(LivisSnack)         #"
-	echo -e "# ${GREEN}网址${PLAIN}: https://livissnack.com   #"
-	echo -e "# ${GREEN}频道${PLAIN}: https://t.me/LivisSnack #"
-	echo "################################"
-	echo " ----------------------"
-	echo -e "  ${GREEN}1.${PLAIN}  安装ShadowSocks"
-	echo -e "  ${GREEN}2.${PLAIN}  ${RED}卸载ShadowSocks${PLAIN}"
-	echo " ----------------------"
-	echo -e "  ${GREEN}3.${PLAIN}  重启ShadowSocks"
-	echo -e "  ${GREEN}4.${PLAIN}  停止ShadowSocks"
-	echo " ----------------------"
-	echo -e "  ${GREEN}5.${PLAIN}  查看SS配置"
-	echo -e "  ${GREEN}6.${PLAIN}  修改SS配置"
-	echo " ----------------------"
-	echo -e "  ${GREEN}0.${PLAIN}  退出"
-	echo ""
-
-	read -p " 请选择操作[0-6]：" answer
-	case $answer in
-		0)
-			exit 0
-			;;
-		1)
-			Install
-			;;
-		2)
-			Uninstall
-			;;
-		3)
-			Restart
-			;;
-		4)
-			Stop
-			;;
-		5)
-			ShowInfo
-			;;
-		6)
-			ChangeConf
-			;;
-		*)
-			colorEcho $RED " 请选择正确的操作！"
-   			sleep 1.5s
-			menu
-			;;
-	esac
-}
-Menu
+check_env
+main_menu
