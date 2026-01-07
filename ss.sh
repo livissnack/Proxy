@@ -1,6 +1,6 @@
 #!/bin/bash
 # =================================================================
-# Script Name: Shadowsocks-Rust 多节点极速管理版
+# Script Name: Shadowsocks-Rust 多节点极速管理版 (信息增强)
 # Author:      LivisSnack <https://livissnack.com>
 # =================================================================
 
@@ -42,27 +42,16 @@ download_rust_bin() {
     if [[ ! -f /usr/local/bin/ssserver ]]; then
         echo -e "\n${BLUE}首次运行，开始部署核心环境...${PLAIN}"
 
-        # [1/3] 安装依赖 (不含 xz)
-        log_progress "1" "3" "正在安装系统依赖 (tar, curl, wget)"
-        case ${OS} in
-            yum) yum install -y tar curl wget net-tools >/dev/null 2>&1 ;;
-            apt) apt-get update -qq && apt-get install -y -qq tar curl wget net-tools >/dev/null 2>&1 ;;
-            apk) apk add --no-cache tar curl wget net-tools >/dev/null 2>&1 ;;
-        esac
-        log_info "依赖环境配置完成"
-
-        # [2/3] 获取版本
-        log_progress "2" "3" "配置目标版本信息"
+        log_progress "1" "2" "配置目标版本信息"
         get_arch
         local latest_ver="v1.24.0"
         log_info "目标版本: $latest_ver"
 
-        # [3/3] 执行下载
-        log_progress "3" "3" "开始流式下载并解压"
-        local url="https://raw.githubusercontent.com/livissnack/Proxy/main/shadowsocks-${latest_ver}.${ARCH}.tar"
+        log_progress "2" "2" "开始流式下载并解压 (.tar.gz)"
+        local url="https://raw.githubusercontent.com/livissnack/Proxy/main/shadowsocks-${latest_ver}.${ARCH}.tar.gz"
 
-        # 使用 -x 解压 .tar 文件
-        curl -L "$url" | tar -x -C /usr/local/bin/ ssserver ssurl
+        # 使用 -xz 解压 .tar.gz 文件
+        curl -L "$url" | tar -xz -C /usr/local/bin/ ssserver ssurl
 
         if [[ ! -f /usr/local/bin/ssserver ]]; then
             log_error "下载或解压失败！请确认 URL 是否有效。"
@@ -74,10 +63,16 @@ download_rust_bin() {
     fi
 }
 
+# --- 生成 URL 函数 ---
+generate_url() {
+    local p=$1; local m=$2; local k=$3
+    # 格式: ss://base64(method:pass)@ip:port#备注
+    /usr/local/bin/ssurl --encode "ss://${m}:${k}@${IP4}:${p}#livis-ss-${IP4}"
+}
+
 # --- 安装节点逻辑 ---
 install_node() {
     download_rust_bin
-
     echo -e "${BLUE}>>> 进入节点配置流程${PLAIN}"
     while true; do
         read -p "请输入端口 [1-65535]: " PORT
@@ -98,11 +93,9 @@ install_node() {
     CIPHER=${CIPHER_LIST[$((pick-1))]}
 
     read -p "设置密码 (回车随机): " PASS
-    [[ -z "${PASS}" ]] && PASS=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 12)
+    [[ -z "${PASS}" ]] && PASS=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 40)
 
     echo -e "\n${BLUE}开始部署节点...${PLAIN}"
-    log_progress "1" "2" "正在写入系统服务文件 (ss-rust-${PORT})"
-
     if [[ ${OS} == "apk" ]]; then
         cat > /etc/init.d/ss-rust-${PORT} <<EOF
 #!/sbin/openrc-run
@@ -112,7 +105,6 @@ command_background=true
 pidfile="/run/\${RC_SVCNAME}.pid"
 EOF
         chmod +x /etc/init.d/ss-rust-${PORT}
-        log_progress "2" "2" "正在启动 OpenRC 服务"
         rc-update add ss-rust-${PORT} >/dev/null 2>&1
         service ss-rust-${PORT} restart
     else
@@ -129,32 +121,41 @@ Restart=on-failure
 [Install]
 WantedBy=multi-user.target
 EOF
-        log_progress "2" "2" "正在启动 Systemd 服务并设置开机自启"
         systemctl daemon-reload
         systemctl enable ss-rust-${PORT} >/dev/null 2>&1
         systemctl restart ss-rust-${PORT}
     fi
 
     log_info "节点 ${PORT} 启动成功！"
-    generate_url "$PORT" "$CIPHER" "$PASS"
+    local ss_link=$(generate_url "$PORT" "$CIPHER" "$PASS")
+    echo -e "\n${GREEN}节点链接:${PLAIN} ${RED}${ss_link}${PLAIN}"
     echo -e "\n请按回车键返回菜单..." && read
 }
 
-# --- 查看节点 ---
+# --- 查看节点 (增强版) ---
 list_nodes() {
-    log_info "查询节点状态中..."
+    log_info "正在检索详细节点信息..."
     local files=$(ls /etc/systemd/system/ss-rust-*.service /etc/init.d/ss-rust-* 2>/dev/null)
+
     if [[ -z "$files" ]]; then
         log_warn "未发现任何已安装的节点"
     else
-        echo -e "${BLUE}--------------------------------------------------${PLAIN}"
+        echo -e "${BLUE}================================================================================${PLAIN}"
         for f in $files; do
             local p=$(echo $f | grep -oP 'ss-rust-\K[0-9]+')
             local m=$(grep -oP '(?<=-m )[^ ]+' $f)
             local k=$(grep -oP '(?<=-k )[^ ]+' $f)
-            echo -e " 端口: ${GREEN}${p}${PLAIN} | 加密: ${YELLOW}${m}${PLAIN} | 密码: ${k}"
+            local lnk=$(generate_url "$p" "$m" "$k")
+
+            echo -e "【节点端口】: ${GREEN}${p}${PLAIN}"
+            echo -e "  - 协议: Shadowsocks (Rust)"
+            echo -e "  - IP地址: ${YELLOW}${IP4}${PLAIN}"
+            echo -e "  - 加密方式: ${YELLOW}${m}${PLAIN}"
+            echo -e "  - 节点密码: ${YELLOW}${k}${PLAIN}"
+            echo -e "  - 节点链接: ${RED}${lnk}${PLAIN}"
+            echo -e "${BLUE}--------------------------------------------------------------------------------${PLAIN}"
         done
-        echo -e "${BLUE}--------------------------------------------------${PLAIN}"
+        echo -e "${BLUE}================================================================================${PLAIN}"
     fi
     read -p "回车返回..." temp
 }
@@ -178,18 +179,16 @@ delete_node() {
     sleep 1
 }
 
-# --- 新增功能：一键重启所有节点 ---
+# --- 一键重启 ---
 restart_all() {
     log_info "正在尝试重启所有 Shadowsocks-Rust 节点..."
     if [[ ${OS} == "apk" ]]; then
         local files=$(ls /etc/init.d/ss-rust-* 2>/dev/null)
         for f in $files; do
-            local svc=$(basename $f)
-            service $svc restart >/dev/null 2>&1
+            local svc=$(basename $f); service $svc restart >/dev/null 2>&1
             echo -e " 重启服务: ${GREEN}$svc${PLAIN} ... [OK]"
         done
     else
-        # Systemd 支持通配符重启
         systemctl restart "ss-rust-*" >/dev/null 2>&1
         log_info "所有 ss-rust-* 服务已完成重启指令发送"
     fi
@@ -197,20 +196,15 @@ restart_all() {
     echo -e "\n请按回车键返回菜单..." && read
 }
 
-generate_url() {
-    local url=$(/usr/local/bin/ssurl --encode "ss://${2}:${3}@${IP4}:${1}#SS-Rust-${1}")
-    echo -e " ${BLUE}节点链接:${PLAIN} ${RED}${url}${PLAIN}"
-}
-
 main_menu() {
     while true; do
         clear
         echo -e "${BLUE}########################################${PLAIN}"
         echo -e "${BLUE}#${PLAIN}    ${GREEN}Shadowsocks-Rust 多节点管理${PLAIN}      ${BLUE}#${PLAIN}"
-        echo -e "${BLUE}#${PLAIN}       [ 状态: 运行中 | 架构: $CPU_ARCH ]      ${BLUE}#${PLAIN}"
+        echo -e "${BLUE}#${PLAIN}       [ IP: $IP4 | ARCH: $CPU_ARCH ]      ${BLUE}#${PLAIN}"
         echo -e "${BLUE}########################################${PLAIN}"
         echo " 1) 添加新节点 (部署+启动)"
-        echo " 2) 查看所有节点"
+        echo " 2) 查看所有节点 (详细信息+URL)"
         echo " 3) 删除指定节点"
         echo " 4) 一键重启所有节点"
         echo " 0) 退出脚本"
