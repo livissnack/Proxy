@@ -27,18 +27,16 @@ show_ads() {
 check_env() {
     [[ $EUID -ne 0 ]] && echo "请使用 root 运行" && exit 1
 
-    # 1. 强制落盘：如果当前执行路径不是固定路径，则尝试复制过去
-    if [[ "$(readlink -f "$0")" != "$FINAL_SCRIPT" ]]; then
-        cp "$0" "$FINAL_SCRIPT" 2>/dev/null || cat "$0" > "$FINAL_SCRIPT"
+    # 1. 从远程下载最新脚本到固定路径
+    if [[ ! -f "$FINAL_SCRIPT" ]] || [[ -z "$(grep 'Script Name' "$FINAL_SCRIPT" 2>/dev/null)" ]]; then
+        curl -sL -o "$FINAL_SCRIPT" "https://raw.githubusercontent.com/livissnack/Proxy/main/ss-rust.sh" || {
+            echo "下载脚本失败"; exit 1
+        }
         chmod +x "$FINAL_SCRIPT"
     fi
 
-    # 2. 弃用 alias，直接创建系统软链接 (这是在 Docker 中最生效的方式)
-    # 这样你输入 sk 实际上是运行 /usr/local/bin/sk -> /usr/local/bin/ss-rust.sh
+    # 2. 确保软链接存在
     ln -sf "$FINAL_SCRIPT" /usr/local/bin/sk
-
-    # 3. 清理 .bashrc 中之前错误的 alias (可选)
-    sed -i '/alias sk=/d' ~/.bashrc 2>/dev/null
 
     # 识别环境
     if [[ -f /.dockerenv ]] || grep -q 'docker\|lxc' /proc/1/cgroup 2>/dev/null; then
@@ -51,6 +49,7 @@ check_env() {
         INIT_TYPE="nohup"
     fi
 }
+
 
 # --- 核心安装与控制逻辑 (同前，已略) ---
 install_core() {
