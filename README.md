@@ -5,5 +5,5 @@
 ### ShadowSocks (支持alpine)
 alpine请先安装bash curl
 ```shell
-bash <(curl -fsSL https://raw.githubusercontent.com/livissnack/Proxy/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/livissnack/Proxy/main/ss.sh)
 ```
