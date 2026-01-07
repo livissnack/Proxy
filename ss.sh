@@ -37,38 +37,48 @@ get_arch() {
     esac
 }
 
-# --- 核心程序下载 ---
+# --- 自动安装解压依赖 ---
+install_deps() {
+    log_step "正在检查并安装必要依赖 (xz, wget)..."
+    case ${OS} in
+        yum)
+            yum install -y wget xz tar >/dev/null 2>&1
+            ;;
+        apt)
+            apt update >/dev/null 2>&1
+            apt install -y wget xz-utils tar >/dev/null 2>&1
+            ;;
+        apk)
+            apk add wget xz tar >/dev/null 2>&1
+            ;;
+    esac
+}
+
+# --- 修改后的下载函数 ---
 download_rust_bin() {
     if [[ ! -f /usr/local/bin/ssserver ]]; then
-        log_step "准备环境并下载核心程序..."
-
-        # 1. 快速安装解压依赖（仅需几秒）
-        if [[ ${OS} == "apk" ]]; then
-            apk add xz tar curl >/dev/null 2>&1
-        elif [[ ${OS} == "yum" ]]; then
-            yum install -y xz tar curl >/dev/null 2>&1
-        else
-            apt-get update >/dev/null 2>&1 && apt-get install -y xz-utils tar curl >/dev/null 2>&1
-        fi
-
-        # 2. 获取架构和最新版本
+        install_deps  # <--- 确保在这里先安装 xz
+        log_step "正在下载 Shadowsocks-Rust 核心程序..."
         get_arch
+
+        # 获取最新版本号
         local latest_ver=$(curl -s "https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-        [[ -z "$latest_ver" ]] && latest_ver="v1.18.3"
+        [[ -z "$latest_ver" ]] && latest_ver="v1.24.0"
 
         local url="https://github.com/shadowsocks/shadowsocks-rust/releases/download/${latest_ver}/shadowsocks-${latest_ver}.${ARCH}.tar.xz"
 
-        # 3. 直接下载并解压到 /usr/local/bin，不保存压缩包
-        log_step "正在从 GitHub 获取 ssserver (不占用临时空间)..."
-        curl -L "$url" | tar -xJ -C /usr/local/bin/ ssserver ssurl
-
-        if [[ $? -eq 0 ]]; then
-            chmod +x /usr/local/bin/ssserver /usr/local/bin/ssurl
-            log_info "核心程序安装成功！"
-        else
-            log_error "下载或解压失败，请检查网络连接或 GitHub 访问权限。"
+        # 使用 wget 下载并解压
+        wget -qO ss.tar.xz "$url"
+        if [[ ! -f ss.tar.xz ]]; then
+            log_error "下载失败，请检查网络连接！"
             exit 1
         fi
+
+        # 解压
+        tar -xJf ss.tar.xz -C /usr/local/bin/ ssserver ssurl
+        chmod +x /usr/local/bin/ssserver /usr/local/bin/ssurl
+        rm -f ss.tar.xz
+        log_info "核心程序安装成功"
     fi
 }
 
