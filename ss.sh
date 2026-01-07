@@ -1,8 +1,7 @@
 #!/bin/bash
 # =================================================================
-# Script Name: Shadowsocks-Rust 多节点全能兼容最终版
+# Script Name: Shadowsocks-Rust 多节点全能兼容增强版
 # Alias:       sk (快速管理)
-# Support:     Systemd, OpenRC, Docker, LXC, NAT, VPS
 # =================================================================
 
 # --- 1. 基础配置与颜色 ---
@@ -25,20 +24,17 @@ show_ads() {
     echo -e "${BLUE}------------- END -------------${PLAIN}"
     echo -e "关注(tg): ${YELLOW}https://t.me/livissnack${PLAIN}"
     echo -e "文档(doc): ${YELLOW}https://github.com/livissnack/Proxy/${PLAIN}"
-    echo -e "博客(ads): 推荐: ${GREEN}https://livissnack.com/${PLAIN}"
 }
 
 # --- 3. 环境检测与 Alias 设置 ---
 check_env() {
     [[ $EUID -ne 0 ]] && echo "请使用 root 运行" && exit 1
-
-    # 设置别名 sk
     local script_path=$(readlink -f "$0")
     if ! grep -q "alias sk=" ~/.bashrc; then
         echo "alias sk='$script_path'" >> ~/.bashrc
         [[ -f ~/.zshrc ]] && echo "alias sk='$script_path'" >> ~/.zshrc
-        source ~/.bashrc 2>/dev/null
     fi
+    alias sk="$script_path"
 
     if [[ -f /etc/alpine-release ]]; then OS="alpine";
     elif command -v apt >/dev/null 2>&1; then OS="debian";
@@ -56,7 +52,7 @@ check_env() {
     fi
 }
 
-# --- 4. 依赖与核心安装 ---
+# --- 4. 核心安装 ---
 install_core() {
     if [[ ! -f /usr/local/bin/ssserver ]]; then
         case "$CPU_ARCH" in
@@ -64,7 +60,6 @@ install_core() {
             aarch64|armv8) ARCH="aarch64-unknown-linux-musl" ;;
             *) echo "不支持的架构"; exit 1 ;;
         esac
-
         local ver="v1.24.0"
         local url="https://raw.githubusercontent.com/livissnack/Proxy/main/shadowsocks-${ver}.${ARCH}.tar.gz"
         curl -Lk "$url" | tar -xz -C /usr/local/bin/ ssserver ssurl
@@ -82,9 +77,11 @@ display_node_line() {
     local idx=$1; local port=$2; local cipher=$3; local pass=$4
     local lnk=$(generate_url "$port" "$cipher" "$pass")
     local prefix=""
+    # 序号放在最前面
     [[ -n "$idx" ]] && prefix="${BLUE}[$idx]${PLAIN} "
-    echo -e "协议：${prefix}${GREEN}SS-Rust${PLAIN} | IP：${GREEN}${IP4} | 端口：${port}${PLAIN} | 加密：${YELLOW}${cipher}${PLAIN} | 密码: ${YELLOW}${pass}${PLAIN}"
-    echo -e "  🔗 ${RED}${lnk}${PLAIN}"
+
+    echo -e "${prefix}协议：${GREEN}SS-Rust${PLAIN} | IP：${GREEN}${IP4} | 端口：${GREEN}${port}${PLAIN} | 加密：${YELLOW}${cipher}${PLAIN} | 密码: ${YELLOW}${pass}${PLAIN}"
+    echo -e "    🔗 ${RED}${lnk}${PLAIN}"
 }
 
 # --- 6. 节点控制逻辑 ---
@@ -107,6 +104,7 @@ EOF
                 systemctl restart ss-rust-${port}
             else
                 systemctl stop ss-rust-${port} >/dev/null 2>&1
+                systemctl disable ss-rust-${port} >/dev/null 2>&1
                 rm -f /etc/systemd/system/ss-rust-${port}.service && systemctl daemon-reload
             fi
             ;;
@@ -139,15 +137,17 @@ EOF
 add_node() {
     install_core
     echo -e "\n${BLUE}>>> 添加新节点配置${PLAIN}"
-    read -p "请输入端口 [默认6666]: " PORT
-    [[ -z "$PORT" ]] && PORT="6666"
+
+    # 默认生成随机端口 (10000-60000)
+    local rand_p=$(shuf -i 10000-60000 -n 1)
+    read -p "请输入端口 [默认随机 $rand_p]: " PORT
+    [[ -z "$PORT" ]] && PORT=$rand_p
 
     if netstat -tuln | grep -q ":${PORT} "; then
         echo -e "${RED}错误: 端口 ${PORT} 已被占用。${PLAIN}"
         read -p "回车继续..." && return
     fi
 
-    # --- 恢复竖向排版 ---
     echo -e "请选择加密方式:"
     echo -e " ${GREEN}1.${PLAIN} aes-256-gcm"
     echo -e " ${GREEN}2.${PLAIN} aes-128-gcm"
@@ -155,13 +155,13 @@ add_node() {
     read -p "请输入序号 [1-3, 默认1]: " CP; [[ -z "$CP" ]] && CP=1
     CIPHER=${CIPHER_LIST[$((CP-1))]}
 
-    read -p "请输入密码 [随机请直接回车]: " PASS; [[ -z "$PASS" ]] && PASS=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 20)
+    read -p "请输入密码 [随机请直接回车]: " PASS; [[ -z "$PASS" ]] && PASS=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 16)
 
     manage_service "start" "$PORT" "$CIPHER" "$PASS"
     echo "${CIPHER}|${PASS}" > "$CONF_DIR/${PORT}.conf"
 
     echo -e "\n${GREEN}[✔] 部署成功！信息如下：${PLAIN}"
-    display_node_line "" "$PORT" "$CIPHER" "$PASS"
+    display_node_line "NEW" "$PORT" "$CIPHER" "$PASS"
     show_ads
     exit 0
 }
@@ -169,28 +169,49 @@ add_node() {
 list_nodes() {
     echo -e "\n${BLUE}=== 已安装节点列表 ===${PLAIN}"
     local count=1
-    local files=$(ls $CONF_DIR/*.conf 2>/dev/null)
-    if [[ -z "$files" ]]; then
+    # 将文件读入数组以保证序号对应准确
+    local files=($CONF_DIR/*.conf)
+    if [[ ! -e "${files[0]}" ]]; then
         echo -e "${YELLOW}当前暂无节点。${PLAIN}"
+        return 1
     else
-        for f in $files; do
+        for f in "${files[@]}"; do
             local p=$(basename "$f" .conf); local c=$(cat "$f" | cut -d'|' -f1); local k=$(cat "$f" | cut -d'|' -f2)
             display_node_line "$count" "$p" "$c" "$k"
             echo -e "${BLUE}--------------------------------------------------------------------------------${PLAIN}"
             ((count++))
         done
+        return 0
     fi
-    show_ads
-    read -p "回车返回..."
 }
 
 del_node() {
-    read -p "请输入要删除的节点端口: " P
-    if [[ -f "$CONF_DIR/${P}.conf" ]]; then
-        manage_service "stop" "$P"; rm -f "$CONF_DIR/${P}.conf"
-        echo -e "${GREEN}节点 $P 已删除。${PLAIN}"
-    else
-        echo -e "${RED}找不到该节点。${PLAIN}"
+    if list_nodes; then
+        echo -e "\n${YELLOW}删除提示：输入左侧 [序号] 或直接输入 [端口号]${PLAIN}"
+        read -p "请输入要删除的内容: " INPUT
+        [[ -z "$INPUT" ]] && return
+
+        local target_port=""
+        local files=($CONF_DIR/*.conf)
+
+        # 逻辑：判断是否为纯数字，且在有效序号范围内
+        if [[ "$INPUT" =~ ^[0-9]+$ ]] && [ "$INPUT" -le "${#files[@]}" ] && [ "$INPUT" -gt 0 ] && [ ${#INPUT} -le 2 ]; then
+            local idx=$((INPUT-1))
+            target_port=$(basename "${files[$idx]}" .conf)
+        else
+            # 否则判断是否为存在的端口文件名
+            if [[ -f "$CONF_DIR/${INPUT}.conf" ]]; then
+                target_port=$INPUT
+            fi
+        fi
+
+        if [[ -n "$target_port" ]]; then
+            manage_service "stop" "$target_port"
+            rm -f "$CONF_DIR/${target_port}.conf"
+            echo -e "${GREEN}节点 $target_port 已成功删除。${PLAIN}"
+        else
+            echo -e "${RED}输入无效，找不到对应序号或端口。${PLAIN}"
+        fi
     fi
     sleep 1
 }
@@ -212,6 +233,7 @@ uninstall() {
     read -p "确定卸载吗？(y/n): " confirm
     [[ "$confirm" != "y" ]] && return
     for f in $CONF_DIR/*.conf; do
+        [[ ! -f "$f" ]] && continue
         local p=$(basename "$f" .conf); manage_service "stop" "$p"
     done
     rm -rf $CONF_DIR /usr/local/bin/ssserver /usr/local/bin/ssurl
@@ -228,9 +250,9 @@ main_menu() {
         echo -e " [ 环境: $INIT_TYPE | IP: $IP4 ]"
         echo -e " [ 别名快捷指令: sk ]"
         echo -e "${BLUE}========================================${PLAIN}"
-        echo " 1. 添加节点 (完成后退出)"
+        echo " 1. 添加节点 (默认随机端口)"
         echo " 2. 查看所有节点"
-        echo " 3. 删除指定节点"
+        echo " 3. 删除指定节点 (支持序号/端口)"
         echo " 4. 一键重启所有节点"
         echo " 5. 一键彻底卸载"
         echo " 0. 退出脚本"
@@ -238,7 +260,7 @@ main_menu() {
         read -p "选择操作 [0-5]: " opt
         case $opt in
             1) add_node ;;
-            2) list_nodes ;;
+            2) list_nodes && show_ads && read -p "回车返回..." ;;
             3) del_node ;;
             4) restart_all ;;
             5) uninstall ;;
