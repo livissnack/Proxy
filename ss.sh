@@ -117,7 +117,7 @@ Download() {
     mkdir -p /etc/ss
     rm -rf /etc/ss/shadowsocks
     ArchAffix
-    DOWNLOAD_LINK="https://raw.githubusercontent.com/Slotheve/backup/main/shadowsocks"
+    DOWNLOAD_LINK="https://raw.githubusercontent.com/livissnack/Proxy/main/shadowsocks"
     colorEcho $YELLOW "下载ShadowSocks: ${DOWNLOAD_LINK}"
     curl -L -H "Cache-Control: no-cache" -o /etc/ss/shadowsocks ${DOWNLOAD_LINK}
     chmod +x /etc/ss/shadowsocks
