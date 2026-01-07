@@ -1,236 +1,227 @@
 #!/bin/bash
 # =================================================================
-# Script Name: Shadowsocks-Rust 多节点极速管理版
-# Author:      LivisSnack <https://livissnack.com>
+# Script Name: Shadowsocks-Rust 多节点全能兼容版
+# Support:     Systemd, OpenRC, Docker, LXC, NAT, VPS
+# OS:          Debian, Ubuntu, Alpine, CentOS, etc.
 # =================================================================
 
-# --- 基础配置 ---
+# --- 1. 基础配置与颜色 ---
 RED="\033[31m"
 GREEN="\033[32m"
 YELLOW="\033[33m"
 BLUE="\033[36m"
 PLAIN='\033[0m'
 
-IP4=$(curl -sL -4 ip.sb || echo "127.0.0.1")
+CONF_DIR="/etc/ss-rust"
+mkdir -p $CONF_DIR
+
+IP4=$(curl -sL -4 ip.sb || curl -sL -4 ifconfig.me || echo "127.0.0.1")
 CPU_ARCH=$(uname -m)
 CIPHER_LIST=(aes-256-gcm aes-128-gcm chacha20-ietf-poly1305)
 
-# --- 状态显示函数 ---
-log_info()    { echo -e "${GREEN}[✔]${PLAIN} ${1}"; }
-log_warn()    { echo -e "${YELLOW}[!]${PLAIN} ${1}"; }
-log_error()   { echo -e "${RED}[✘]${PLAIN} ${1}"; }
-log_progress() {
-    echo -e "${BLUE}[Step $1/$2]${PLAIN} ${YELLOW}$3...${PLAIN}"
-}
-
-# --- 环境检查 ---
+# --- 2. 核心环境检测 ---
 check_env() {
-    [[ $EUID -ne 0 ]] && log_error "请使用 root 权限运行" && exit 1
-    if [[ -n "$(command -v yum)" ]]; then OS="yum"; elif [[ -n "$(command -v apt)" ]]; then OS="apt"; elif [[ -n "$(command -v apk)" ]]; then OS="apk"; else log_error "不支持的系统"; exit 1; fi
-    # 确保 openssl 存在用于生成 Base64
-    if ! command -v openssl >/dev/null 2>&1; then
-        case ${OS} in
-            apt) apt-get update -qq && apt-get install -y openssl >/dev/null 2>&1 ;;
-            yum) yum install -y openssl >/dev/null 2>&1 ;;
-            apk) apk add openssl >/dev/null 2>&1 ;;
-        esac
+    [[ $EUID -ne 0 ]] && echo "请使用 root 运行" && exit 1
+
+    # 操作系统检测
+    if [[ -f /etc/alpine-release ]]; then OS="alpine";
+    elif command -v apt >/dev/null 2>&1; then OS="debian";
+    elif command -v yum >/dev/null 2>&1; then OS="centos";
     fi
-}
 
-get_arch() {
-    case "$CPU_ARCH" in
-        x86_64|amd64) ARCH="x86_64-unknown-linux-musl" ;;
-        aarch64|armv8) ARCH="aarch64-unknown-linux-musl" ;;
-        *) log_error "暂不支持的架构: $CPU_ARCH"; exit 1 ;;
-    esac
-}
-
-# --- 核心下载逻辑 ---
-download_rust_bin() {
-    if [[ ! -f /usr/local/bin/ssserver ]]; then
-        echo -e "\n${BLUE}首次运行，开始部署核心环境...${PLAIN}"
-        get_arch
-        local latest_ver="v1.24.0"
-        log_progress "1" "2" "获取版本: $latest_ver"
-        log_progress "2" "2" "开始流式下载并解压 (.tar.gz)"
-        local url="https://raw.githubusercontent.com/livissnack/Proxy/main/shadowsocks-${latest_ver}.${ARCH}.tar.gz"
-        curl -Lk "$url" | tar -xz -C /usr/local/bin/ ssserver ssurl
-        if [[ ! -f /usr/local/bin/ssserver ]]; then
-            log_error "核心程序部署失败！"
-            exit 1
-        fi
-        chmod +x /usr/local/bin/ssserver /usr/local/bin/ssurl
-        log_info "核心部署成功！\n"
-    fi
-}
-
-# --- URL 生成 ---
-generate_url() {
-    local p=$1; local m=$2; local k=$3
-    local auth_base64=$(echo -n "${m}:${k}" | openssl base64 -A)
-    echo -n "ss://${auth_base64}@${IP4}:${p}#livis-ss-${IP4}"
-}
-
-# --- 展示节点详情块 ---
-display_node_box() {
-    local p=$1; local m=$2; local k=$3
-    local lnk=$(generate_url "$p" "$m" "$k")
-    echo -e "${BLUE}================================================================================${PLAIN}"
-    echo -e "【节点端口】: ${GREEN}${p}${PLAIN}"
-    echo -e "  - 协议: Shadowsocks (Rust)"
-    echo -e "  - IP地址: ${YELLOW}${IP4}${PLAIN}"
-    echo -e "  - 加密方式: ${YELLOW}${m}${PLAIN}"
-    echo -e "  - 节点密码: ${YELLOW}${k}${PLAIN}"
-    echo -e "  - 节点链接: ${RED}${lnk}${PLAIN}"
-    echo -e "${BLUE}================================================================================${PLAIN}"
-}
-
-# --- 安装节点 ---
-install_node() {
-    download_rust_bin
-    echo -e "${BLUE}>>> 进入节点配置流程${PLAIN}"
-    while true; do
-        read -p "请输入端口 [1-65535] (默认6666): " PORT
-        [[ -z "$PORT" ]] && PORT="6666"
-        if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
-            log_error "格式错误"
-        elif netstat -tuln | grep -q ":${PORT} "; then
-            log_warn "端口已被占用"
-        else break; fi
-    done
-    echo -e "选择加密方式:"
-    for i in "${!CIPHER_LIST[@]}"; do echo -e " ${GREEN}$((i+1)).${PLAIN} ${CIPHER_LIST[$i]}"; done
-    read -p "选择 [1-3] (默认1): " pick
-    [[ -z "$pick" ]] && pick=1
-    CIPHER=${CIPHER_LIST[$((pick-1))]}
-    read -p "设置密码 (随机回车): " PASS
-    [[ -z "${PASS}" ]] && PASS=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 12)
-
-    if [[ ${OS} == "apk" ]]; then
-        cat > /etc/init.d/ss-rust-${PORT} <<EOF
-#!/sbin/openrc-run
-command="/usr/local/bin/ssserver"
-command_args="-s 0.0.0.0:${PORT} -m ${CIPHER} -k ${PASS} -u"
-command_background=true
-pidfile="/run/\${RC_SVCNAME}.pid"
-EOF
-        chmod +x /etc/init.d/ss-rust-${PORT}
-        rc-update add ss-rust-${PORT} >/dev/null 2>&1
-        service ss-rust-${PORT} restart
+    # 运行环境/初始化系统检测
+    if [[ -f /.dockerenv ]] || grep -q 'docker\|lxc' /proc/1/cgroup; then
+        INIT_TYPE="nohup" # 容器环境，降级使用进程管理
+    elif [[ -x /sbin/init ]] || [[ -x /lib/systemd/systemd ]]; then
+        if command -v systemctl >/dev/null 2>&1; then INIT_TYPE="systemd";
+        elif command -v rc-service >/dev/null 2>&1; then INIT_TYPE="openrc";
+        else INIT_TYPE="nohup"; fi
     else
-        cat > /etc/systemd/system/ss-rust-${PORT}.service <<EOF
+        INIT_TYPE="nohup";
+    fi
+}
+
+# --- 3. 依赖与核心安装 ---
+install_core() {
+    if [[ ! -f /usr/local/bin/ssserver ]]; then
+        echo -e "${BLUE}首次运行，正在安装基础依赖...${PLAIN}"
+        case $OS in
+            "alpine") apk add --no-cache tar curl openssl net-tools >/dev/null 2>&1 ;;
+            "debian") apt-get update -qq && apt-get install -y -qq tar curl openssl net-tools >/dev/null 2>&1 ;;
+            "centos") yum install -y tar curl openssl net-tools >/dev/null 2>&1 ;;
+        esac
+
+        case "$CPU_ARCH" in
+            x86_64|amd64) ARCH="x86_64-unknown-linux-musl" ;;
+            aarch64|armv8) ARCH="aarch64-unknown-linux-musl" ;;
+            *) echo "不支持的架构"; exit 1 ;;
+        esac
+
+        local ver="v1.24.0"
+        local url="https://raw.githubusercontent.com/livissnack/Proxy/main/shadowsocks-${ver}.${ARCH}.tar.gz"
+        echo -e "${YELLOW}正在从下载核心程序...${PLAIN}"
+        curl -Lk "$url" | tar -xz -C /usr/local/bin/ ssserver ssurl
+        chmod +x /usr/local/bin/ssserver /usr/local/bin/ssurl
+    fi
+}
+
+# --- 4. 辅助函数 ---
+generate_url() {
+    local auth=$(echo -n "${2}:${3}" | openssl base64 -A)
+    echo -n "ss://${auth}@${IP4}:${1}#livis-ss-${IP4}"
+}
+
+display_node() {
+    local lnk=$(generate_url "$1" "$2" "$3")
+    echo -e "${BLUE}--------------------------------------------------------------------------------${PLAIN}"
+    echo -e " 端口: ${GREEN}$1${PLAIN} | 加密: ${YELLOW}$2${PLAIN} | 密码: ${YELLOW}$3${PLAIN}"
+    echo -e " 链接: ${RED}${lnk}${PLAIN}"
+}
+
+# --- 5. 节点控制逻辑 (兼容核心) ---
+manage_service() {
+    local action=$1 # start, stop, restart
+    local port=$2
+    local cipher=$3
+    local pass=$4
+
+    case $INIT_TYPE in
+        "systemd")
+            if [[ "$action" == "start" || "$action" == "restart" ]]; then
+                cat > /etc/systemd/system/ss-rust-${port}.service <<EOF
 [Unit]
-Description=ShadowSocks-Rust Port ${PORT}
+Description=SS-Rust Port ${port}
 After=network.target
 [Service]
-Type=simple
-ExecStart=/usr/local/bin/ssserver -s 0.0.0.0:${PORT} -m ${CIPHER} -k ${PASS} -u
-Restart=on-failure
+ExecStart=/usr/local/bin/ssserver -s 0.0.0.0:${port} -m ${cipher} -k ${pass} -u
+Restart=always
 [Install]
 WantedBy=multi-user.target
 EOF
-        systemctl daemon-reload
-        systemctl enable ss-rust-${PORT} >/dev/null 2>&1
-        systemctl restart ss-rust-${PORT}
-    fi
-    log_info "节点 ${PORT} 部署成功！"
-    display_node_box "$PORT" "$CIPHER" "$PASS"
-    echo -e "\n请按回车键返回..." && read
+                systemctl daemon-reload
+                systemctl enable ss-rust-${port} >/dev/null 2>&1
+                systemctl restart ss-rust-${port}
+            else
+                systemctl stop ss-rust-${port} >/dev/null 2>&1
+                systemctl disable ss-rust-${port} >/dev/null 2>&1
+                rm -f /etc/systemd/system/ss-rust-${port}.service
+            fi
+            ;;
+        "openrc")
+            if [[ "$action" == "start" || "$action" == "restart" ]]; then
+                cat > /etc/init.d/ss-rust-${port} <<EOF
+#!/sbin/openrc-run
+command="/usr/local/bin/ssserver"
+command_args="-s 0.0.0.0:${port} -m ${cipher} -k ${pass} -u"
+command_background=true
+pidfile="/run/ss-rust-${port}.pid"
+EOF
+                chmod +x /etc/init.d/ss-rust-${port}
+                rc-update add ss-rust-${port} default >/dev/null 2>&1
+                service ss-rust-${port} restart
+            else
+                service ss-rust-${port} stop >/dev/null 2>&1
+                rc-update del ss-rust-${port} >/dev/null 2>&1
+                rm -f /etc/init.d/ss-rust-${port}
+            fi
+            ;;
+        "nohup")
+            # 容器/LXC 专用降级逻辑
+            pkill -f "ssserver.*:${port} " >/dev/null 2>&1
+            if [[ "$action" == "start" || "$action" == "restart" ]]; then
+                nohup /usr/local/bin/ssserver -s 0.0.0.0:${port} -m ${cipher} -k ${pass} -u > /dev/null 2>&1 &
+            fi
+            ;;
+    esac
 }
 
-# --- 查看节点 ---
+# --- 6. 主功能函数 ---
+add_node() {
+    install_core
+    read -p "端口 (默认6666): " PORT
+    [[ -z "$PORT" ]] && PORT="6666"
+    echo -e "1. aes-256-gcm\n2. aes-128-gcm\n3. chacha20-ietf-poly1305"
+    read -p "选择加密 [1-3]: " CP; [[ -z "$CP" ]] && CP=1
+    CIPHER=${CIPHER_LIST[$((CP-1))]}
+    read -p "密码 (随机回车): " PASS; [[ -z "$PASS" ]] && PASS=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 12)
+
+    manage_service "start" "$PORT" "$CIPHER" "$PASS"
+    echo "${CIPHER}|${PASS}" > "$CONF_DIR/${PORT}.conf"
+    echo -e "${GREEN}节点已启动！${PLAIN}"
+    display_node "$PORT" "$CIPHER" "$PASS"
+    read -p "回车继续..."
+}
+
 list_nodes() {
-    log_info "正在检索节点..."
-    local files=$(ls /etc/systemd/system/ss-rust-*.service /etc/init.d/ss-rust-* 2>/dev/null)
-    if [[ -z "$files" ]]; then
-        log_warn "无运行中的节点"
-    else
-        for f in $files; do
-            local p=$(echo $f | grep -oP 'ss-rust-\K[0-9]+')
-            local m=$(grep -oP '(?<=-m )[^ ]+' $f)
-            local k=$(grep -oP '(?<=-k )[^ ]+' $f)
-            display_node_box "$p" "$m" "$k"
-        done
-    fi
-    read -p "回车返回..." temp
+    echo -e "${BLUE}=== 已安装节点列表 ===${PLAIN}"
+    local count=0
+    for f in $CONF_DIR/*.conf; do
+        [[ ! -f "$f" ]] && continue
+        count=$((count+1))
+        local p=$(basename "$f" .conf)
+        local c=$(cat "$f" | cut -d'|' -f1)
+        local k=$(cat "$f" | cut -d'|' -f2)
+        display_node "$p" "$c" "$k"
+    done
+    [[ $count -eq 0 ]] && echo "暂无节点"
+    read -p "回车继续..."
 }
 
-# --- 删除单个节点 ---
-delete_node() {
-    read -p "输入要删除的端口: " P_DEL
-    [[ -z "$P_DEL" ]] && return
-    if [[ ${OS} == "apk" ]]; then
-        service ss-rust-${P_DEL} stop >/dev/null 2>&1
-        rc-update del ss-rust-${P_DEL} >/dev/null 2>&1
-        rm -f /etc/init.d/ss-rust-${P_DEL}
+del_node() {
+    read -p "输入要删除的端口: " P
+    if [[ -f "$CONF_DIR/${P}.conf" ]]; then
+        manage_service "stop" "$P"
+        rm -f "$CONF_DIR/${P}.conf"
+        echo -e "${GREEN}节点 $P 已删除${PLAIN}"
     else
-        systemctl stop ss-rust-${P_DEL} >/dev/null 2>&1
-        systemctl disable ss-rust-${P_DEL} >/dev/null 2>&1
-        rm -f /etc/systemd/system/ss-rust-${P_DEL}.service
-        systemctl daemon-reload
+        echo -e "${RED}节点不存在${PLAIN}"
     fi
-    log_info "节点 ${P_DEL} 已清理"
     sleep 1
 }
 
-# --- 一键重启 ---
 restart_all() {
-    log_info "正在重启所有节点..."
-    [[ ${OS} == "apk" ]] && (for f in /etc/init.d/ss-rust-*; do service $(basename $f) restart; done) || systemctl restart "ss-rust-*"
-    log_info "已执行批量重启"
-    sleep 1 && read -p "回车返回..." temp
-}
-
-# --- 一键清除 (卸载) ---
-uninstall_all() {
-    echo -e "${RED}！！！警告：这将停止并删除所有节点及 SS 核心程序 ！！！${PLAIN}"
-    read -p "确定要清除吗？(y/n): " confirm
-    [[ "$confirm" != "y" ]] && return
-
-    log_progress "1" "2" "正在停止并清理所有服务"
-    local files=$(ls /etc/systemd/system/ss-rust-*.service /etc/init.d/ss-rust-* 2>/dev/null)
-    for f in $files; do
-        local p=$(echo $f | grep -oP 'ss-rust-\K[0-9]+')
-        if [[ ${OS} == "apk" ]]; then
-            service ss-rust-$p stop >/dev/null 2>&1
-            rc-update del ss-rust-$p >/dev/null 2>&1
-            rm -f $f
-        else
-            systemctl stop ss-rust-$p >/dev/null 2>&1
-            systemctl disable ss-rust-$p >/dev/null 2>&1
-            rm -f $f
-        fi
+    echo -e "${YELLOW}正在重启所有节点...${PLAIN}"
+    for f in $CONF_DIR/*.conf; do
+        [[ ! -f "$f" ]] && continue
+        local p=$(basename "$f" .conf)
+        local c=$(cat "$f" | cut -d'|' -f1)
+        local k=$(cat "$f" | cut -d'|' -f2)
+        manage_service "restart" "$p" "$c" "$k"
+        echo -e "重启端口 $p ... [OK]"
     done
-    [[ ${OS} != "apk" ]] && systemctl daemon-reload
-
-    log_progress "2" "2" "正在删除核心程序"
-    rm -f /usr/local/bin/ssserver /usr/local/bin/ssurl
-
-    log_info "卸载完成！系统已恢复纯净。"
-    sleep 2 && exit 0
+    sleep 1
 }
 
+uninstall() {
+    read -p "确定要卸载吗？(y/n): " confirm
+    [[ "$confirm" != "y" ]] && return
+    for f in $CONF_DIR/*.conf; do
+        local p=$(basename "$f" .conf)
+        manage_service "stop" "$p"
+    done
+    rm -rf $CONF_DIR /usr/local/bin/ssserver /usr/local/bin/ssurl
+    echo "卸载完成！"
+    exit 0
+}
+
+# --- 7. 菜单入口 ---
 main_menu() {
     while true; do
         clear
-        echo -e "${BLUE}########################################${PLAIN}"
-        echo -e "${BLUE}#${PLAIN}    ${GREEN}Shadowsocks-Rust 多节点管理${PLAIN}      ${BLUE}#${PLAIN}"
-        echo -e "${BLUE}#${PLAIN}       [ IP: $IP4 | ARCH: $CPU_ARCH ]      ${BLUE}#${PLAIN}"
-        echo -e "${BLUE}########################################${PLAIN}"
-        echo " 1) 添加新节点"
-        echo " 2) 查看所有节点"
-        echo " 3) 删除指定节点"
-        echo " 4) 一键重启所有节点"
-        echo " 5) 一键清除 (卸载全部)"
-        echo " 0) 退出"
-        echo ""
-        read -p "选择操作 [0-5]: " num
-        case "$num" in
-            1) install_node ;;
+        echo -e "${BLUE}Shadowsocks-Rust 多环境兼容管理 [Env: $INIT_TYPE]${PLAIN}"
+        echo " 1. 添加节点"
+        echo " 2. 查看节点"
+        echo " 3. 删除节点"
+        echo " 4. 一键重启"
+        echo " 5. 一键卸载"
+        echo " 0. 退出"
+        read -p "选择: " opt
+        case $opt in
+            1) add_node ;;
             2) list_nodes ;;
-            3) delete_node ;;
+            3) del_node ;;
             4) restart_all ;;
-            5) uninstall_all ;;
+            5) uninstall ;;
             0) exit 0 ;;
         esac
     done
