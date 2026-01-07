@@ -69,30 +69,42 @@ install_core() {
 
 check_status() {
     echo -e "\n${BLUE}=== 节点运行状态监控 ===${PLAIN}"
+
+    # 获取所有配置文件
     local files=($CONF_DIR/*.conf)
+
+    # 检查配置是否存在
     if [[ ! -e "${files[0]}" ]]; then
-        echo -e "${YELLOW}暂无配置节点。${PLAIN}"
-        return
+        echo -e "${YELLOW}提示：尚未发现任何节点配置。${PLAIN}"
+        read -p "回车返回..." && return
     fi
 
     # 打印表头
-    printf "%-8s %-12s %-10s %-10s\n" "序号" "端口" "状态" "PID"
-    echo "------------------------------------------"
+    echo -e "------------------------------------------------"
+    printf "%-6s %-10s %-12s %-10s\n" "序号" "端口" "状态" "PID"
+    echo -e "------------------------------------------------"
 
     local count=1
     for f in "${files[@]}"; do
         local port=$(basename "$f" .conf)
-        # 查找进程：匹配 ssserver 且包含该端口号
-        local pid=$(ps -ef | grep "ssserver" | grep ":${port}" | grep -v grep | awk '{print $2}')
+
+        # 核心抓取逻辑：
+        # 1. 寻找包含 ssserver 的进程
+        # 2. 匹配该端口号
+        # 3. 提取 PID (兼容所有 ps 格式)
+        local pid=$(ps -ef | grep "ssserver" | grep -w "$port" | grep -v grep | awk '{print $2}')
 
         if [[ -n "$pid" ]]; then
-            printf "${BLUE}[%2d]${PLAIN}    %-12s ${GREEN}%-10s${PLAIN} %-10s\n" "$count" "$port" "RUNNING" "$pid"
+            # 运行中显示 PID
+            printf "${BLUE}[%2d]${PLAIN}   %-10s ${GREEN}%-12s${PLAIN} %-10s\n" "$count" "$port" "RUNNING" "$pid"
         else
-            printf "${BLUE}[%2d]${PLAIN}    %-12s ${RED}%-10s${PLAIN} %-10s\n" "$count" "$port" "STOPPED" "-"
+            # 停止显示 -
+            printf "${BLUE}[%2d]${PLAIN}   %-10s ${RED}%-12s${PLAIN} %-10s\n" "$count" "$port" "STOPPED" "-"
         fi
         ((count++))
     done
-    echo "------------------------------------------"
+    echo -e "------------------------------------------------"
+    read -p "点击回车返回主菜单..."
 }
 
 generate_url() {
