@@ -251,6 +251,7 @@ ShowInfo() {
     colorEcho $BLUE " SS配置信息："
     GetConfig
     OutConfig
+    colorEcho $BLUE " SS节点链接："
     OutConfigUrl
 }
 
@@ -279,8 +280,8 @@ OutConfigUrl() {
     processed_cipher=$(echo "$processed_cipher" | tr '[:upper:]' '[:lower:]')
     local userinfo_base64=$(echo -n "${processed_cipher}:${pass}" | base64 | tr -d '\n' | tr '+/' '-_')
     userinfo_base64=${userinfo_base64%=*}
-    local ss_url="ss://${userinfo_base64}@${IP4}:${port}#livissnack-ss-${IP4}"
-    echo -e "   ${BLUE}SS节点链接：${PLAIN} ${RED}${ss_url}${PLAIN}"
+    local ss_url="ss://${userinfo_base64}@${IP4}:${port// /}#livissnack-ss-${IP4}"
+    echo -e "   ${BLUE}节点URL：${PLAIN} ${RED}${ss_url}${PLAIN}"
 }
 
 ChangeConf(){
