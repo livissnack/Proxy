@@ -1,6 +1,6 @@
 #!/bin/bash
 # =================================================================
-# Script Name: Shadowsocks-Rust 多节点全能兼容增强版
+# Script Name: Shadowsocks-Rust 多节点兼容增强版 (Docker/NAT/VPS)
 # Alias:       sk (快速管理)
 # =================================================================
 
@@ -26,21 +26,40 @@ show_ads() {
     echo -e "文档(doc): ${YELLOW}https://github.com/livissnack/Proxy/${PLAIN}"
 }
 
-# --- 3. 环境检测与 Alias 设置 ---
+# --- 3. 环境检测与 Alias/路径固化 ---
 check_env() {
     [[ $EUID -ne 0 ]] && echo "请使用 root 运行" && exit 1
-    local script_path=$(readlink -f "$0")
+
+    # 路径固化逻辑：解决 pipe 问题
+    local final_path="/usr/local/bin/ss-rust.sh"
+
+    # 如果当前运行的不是固化路径，则尝试固化
+    if [[ "$(readlink -f "$0")" != "$final_path" ]]; then
+        # 如果 $0 是真正的文件则拷贝，否则（pipe方式）提示用户
+        if [[ -f "$0" ]]; then
+            cp -f "$0" "$final_path"
+            chmod +x "$final_path"
+        else
+            # 处理 curl | bash 的情况，将当前脚本流写入固化路径
+            cat "$0" > "$final_path" 2>/dev/null || true
+            chmod +x "$final_path" 2>/dev/null || true
+        fi
+    fi
+
+    # 1. 写入 .bashrc
     if ! grep -q "alias sk=" ~/.bashrc; then
-        echo "alias sk='$script_path'" >> ~/.bashrc
-        [[ -f ~/.zshrc ]] && echo "alias sk='$script_path'" >> ~/.zshrc
-    fi
-    alias sk="$script_path"
-
-    if [[ -f /etc/alpine-release ]]; then OS="alpine";
-    elif command -v apt >/dev/null 2>&1; then OS="debian";
-    elif command -v yum >/dev/null 2>&1; then OS="centos";
+        echo "alias sk='bash $final_path'" >> ~/.bashrc
+        [[ -f ~/.zshrc ]] && echo "alias sk='bash $final_path'" >> ~/.zshrc
     fi
 
+    # 2. 创建系统软链接 (Docker/Debian NAT 核心兼容方案)
+    # 这样即使 alias 不生效，直接输入 sk 也会运行这个脚本
+    ln -sf "$final_path" /usr/local/bin/sk 2>/dev/null
+
+    # 3. 立即生效
+    alias sk="bash $final_path"
+
+    # 环境识别
     if [[ -f /.dockerenv ]] || grep -q 'docker\|lxc' /proc/1/cgroup 2>/dev/null; then
         INIT_TYPE="nohup"
     elif command -v systemctl >/dev/null 2>&1; then
@@ -77,14 +96,13 @@ display_node_line() {
     local idx=$1; local port=$2; local cipher=$3; local pass=$4
     local lnk=$(generate_url "$port" "$cipher" "$pass")
     local prefix=""
-    # 序号放在最前面
     [[ -n "$idx" ]] && prefix="${BLUE}[$idx]${PLAIN} "
 
     echo -e "${prefix}协议：${GREEN}SS-Rust${PLAIN} | IP：${GREEN}${IP4} | 端口：${GREEN}${port}${PLAIN} | 加密：${YELLOW}${cipher}${PLAIN} | 密码: ${YELLOW}${pass}${PLAIN}"
     echo -e "    🔗 ${RED}${lnk}${PLAIN}"
 }
 
-# --- 6. 节点控制逻辑 ---
+# --- 6. 节点控制逻辑 (略，保持之前的 Systemd/OpenRC/Nohup 逻辑) ---
 manage_service() {
     local action=$1; local port=$2; local cipher=$3; local pass=$4
     case $INIT_TYPE in
@@ -137,8 +155,6 @@ EOF
 add_node() {
     install_core
     echo -e "\n${BLUE}>>> 添加新节点配置${PLAIN}"
-
-    # 默认生成随机端口 (10000-60000)
     local rand_p=$(shuf -i 10000-60000 -n 1)
     read -p "请输入端口 [默认随机 $rand_p]: " PORT
     [[ -z "$PORT" ]] && PORT=$rand_p
@@ -168,13 +184,12 @@ add_node() {
 
 list_nodes() {
     echo -e "\n${BLUE}=== 已安装节点列表 ===${PLAIN}"
-    local count=1
-    # 将文件读入数组以保证序号对应准确
     local files=($CONF_DIR/*.conf)
     if [[ ! -e "${files[0]}" ]]; then
         echo -e "${YELLOW}当前暂无节点。${PLAIN}"
         return 1
     else
+        local count=1
         for f in "${files[@]}"; do
             local p=$(basename "$f" .conf); local c=$(cat "$f" | cut -d'|' -f1); local k=$(cat "$f" | cut -d'|' -f2)
             display_node_line "$count" "$p" "$c" "$k"
@@ -194,12 +209,10 @@ del_node() {
         local target_port=""
         local files=($CONF_DIR/*.conf)
 
-        # 逻辑：判断是否为纯数字，且在有效序号范围内
         if [[ "$INPUT" =~ ^[0-9]+$ ]] && [ "$INPUT" -le "${#files[@]}" ] && [ "$INPUT" -gt 0 ] && [ ${#INPUT} -le 2 ]; then
             local idx=$((INPUT-1))
             target_port=$(basename "${files[$idx]}" .conf)
         else
-            # 否则判断是否为存在的端口文件名
             if [[ -f "$CONF_DIR/${INPUT}.conf" ]]; then
                 target_port=$INPUT
             fi
@@ -210,7 +223,7 @@ del_node() {
             rm -f "$CONF_DIR/${target_port}.conf"
             echo -e "${GREEN}节点 $target_port 已成功删除。${PLAIN}"
         else
-            echo -e "${RED}输入无效，找不到对应序号或端口。${PLAIN}"
+            echo -e "${RED}输入无效，找不到对应节点。${PLAIN}"
         fi
     fi
     sleep 1
@@ -236,8 +249,8 @@ uninstall() {
         [[ ! -f "$f" ]] && continue
         local p=$(basename "$f" .conf); manage_service "stop" "$p"
     done
-    rm -rf $CONF_DIR /usr/local/bin/ssserver /usr/local/bin/ssurl
-    echo -e "${GREEN}彻底卸载完成。系统已恢复纯净。${PLAIN}"
+    rm -rf $CONF_DIR /usr/local/bin/ssserver /usr/local/bin/ssurl /usr/local/bin/sk /usr/local/bin/ss-rust.sh
+    echo -e "${GREEN}彻底卸载完成。${PLAIN}"
     exit 0
 }
 
@@ -248,7 +261,7 @@ main_menu() {
         echo -e "${BLUE}========================================${PLAIN}"
         echo -e "${GREEN} Shadowsocks-Rust 多环境管理脚本 ${PLAIN}"
         echo -e " [ 环境: $INIT_TYPE | IP: $IP4 ]"
-        echo -e " [ 别名快捷指令: sk ]"
+        echo -e " [ 快捷管理指令: sk ]"
         echo -e "${BLUE}========================================${PLAIN}"
         echo " 1. 添加节点 (默认随机端口)"
         echo " 2. 查看所有节点"
