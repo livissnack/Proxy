@@ -44,13 +44,6 @@ check_env() {
 # --- 3. 依赖与核心安装 ---
 install_core() {
     if [[ ! -f /usr/local/bin/ssserver ]]; then
-        echo -e "${BLUE}首次运行，正在安装基础依赖...${PLAIN}"
-        case $OS in
-            "alpine") apk add --no-cache tar curl openssl net-tools >/dev/null 2>&1 ;;
-            "debian") apt-get update -qq && apt-get install -y -qq tar curl openssl net-tools >/dev/null 2>&1 ;;
-            "centos") yum install -y tar curl openssl net-tools >/dev/null 2>&1 ;;
-        esac
-
         case "$CPU_ARCH" in
             x86_64|amd64) ARCH="x86_64-unknown-linux-musl" ;;
             aarch64|armv8) ARCH="aarch64-unknown-linux-musl" ;;
