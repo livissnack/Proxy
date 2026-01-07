@@ -63,7 +63,7 @@ download_rust_bin() {
 
         # 获取最新版本号
         local latest_ver=$(curl -s --connect-timeout 5 "https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-        [[ -z "$latest_ver" ]] && latest_ver="v1.18.3"
+        [[ -z "$latest_ver" ]] && latest_ver="v1.24.0"
 
         local url="https://github.com/shadowsocks/shadowsocks-rust/releases/download/${latest_ver}/shadowsocks-${latest_ver}.${ARCH}.tar.xz"
 
