@@ -67,6 +67,34 @@ install_core() {
     fi
 }
 
+check_status() {
+    echo -e "\n${BLUE}=== 节点运行状态监控 ===${PLAIN}"
+    local files=($CONF_DIR/*.conf)
+    if [[ ! -e "${files[0]}" ]]; then
+        echo -e "${YELLOW}暂无配置节点。${PLAIN}"
+        return
+    fi
+
+    # 打印表头
+    printf "%-8s %-12s %-10s %-10s\n" "序号" "端口" "状态" "PID"
+    echo "------------------------------------------"
+
+    local count=1
+    for f in "${files[@]}"; do
+        local port=$(basename "$f" .conf)
+        # 查找进程：匹配 ssserver 且包含该端口号
+        local pid=$(ps -ef | grep "ssserver" | grep ":${port}" | grep -v grep | awk '{print $2}')
+
+        if [[ -n "$pid" ]]; then
+            printf "${BLUE}[%2d]${PLAIN}    %-12s ${GREEN}%-10s${PLAIN} %-10s\n" "$count" "$port" "RUNNING" "$pid"
+        else
+            printf "${BLUE}[%2d]${PLAIN}    %-12s ${RED}%-10s${PLAIN} %-10s\n" "$count" "$port" "STOPPED" "-"
+        fi
+        ((count++))
+    done
+    echo "------------------------------------------"
+}
+
 generate_url() {
     local auth=$(echo -n "${2}:${3}" | openssl base64 -A)
     echo -n "ss://${auth}@${IP4}:${1}#livis-ss-${IP4}"
@@ -207,18 +235,20 @@ main_menu() {
         echo -e "${BLUE}========================================${PLAIN}"
         echo " 1. 添加节点 (默认随机端口)"
         echo " 2. 查看所有节点"
-        echo " 3. 删除指定节点 (支持序号/端口)"
-        echo " 4. 一键重启所有节点"
-        echo " 5. 一键彻底卸载"
+        echo " 3. 查看运行状态 (查看PID/存活)"
+        echo " 4. 删除指定节点 (支持序号/端口)"
+        echo " 5. 一键重启所有节点"
+        echo " 6. 一键彻底卸载"
         echo " 0. 退出脚本"
         echo -e "${BLUE}========================================${PLAIN}"
-        read -p "选择操作 [0-5]: " opt
+        read -p "选择操作 [0-6]: " opt
         case $opt in
             1) add_node ;;
             2) list_nodes && show_ads && read -p "回车返回..." ;;
-            3) del_node ;;
-            4) restart_all ;;
-            5) uninstall ;;
+            3) check_status ;;
+            4) del_node ;;
+            5) restart_all ;;
+            6) uninstall ;;
             0) exit 0 ;;
             *) continue ;;
         esac
