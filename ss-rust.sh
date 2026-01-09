@@ -128,7 +128,7 @@ manage_service() {
 Description=SS-Rust Port ${port}
 After=network.target
 [Service]
-ExecStart=/usr/local/bin/ssserver --tcp-and-udp -s 0.0.0.0:${port} -m ${cipher} -k ${pass}
+ExecStart=/usr/local/bin/ssserver -s 0.0.0.0:${port} -m ${cipher} -k ${pass}
 Restart=always
 [Install]
 WantedBy=multi-user.target
@@ -145,7 +145,7 @@ EOF
                 cat > /etc/init.d/ss-rust-${port} <<EOF
 #!/sbin/openrc-run
 command="/usr/local/bin/ssserver"
-command_args="--tcp-and-udp -s 0.0.0.0:${port} -m ${cipher} -k ${pass}"
+command_args="-s 0.0.0.0:${port} -m ${cipher} -k ${pass}"
 command_background=true
 pidfile="/run/ss-rust-${port}.pid"
 EOF
@@ -159,7 +159,7 @@ EOF
         "nohup")
             pkill -f "ssserver.*:${port} " >/dev/null 2>&1
             if [[ "$action" == "start" || "$action" == "restart" ]]; then
-                nohup /usr/local/bin/ssserver --tcp-and-udp -s 0.0.0.0:${port} -m ${cipher} -k ${pass} > /dev/null 2>&1 &
+                nohup /usr/local/bin/ssserver -s 0.0.0.0:${port} -m ${cipher} -k ${pass} > /dev/null 2>&1 &
             fi
             ;;
     esac
