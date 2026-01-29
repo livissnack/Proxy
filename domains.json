@@ -1,0 +1,67 @@
+{
+  "regions": {
+    "HK": [
+      "www.pccw.com", "www.hkt.com", "www.hkex.com.hk", "www.cathaypacific.com", "www.hkgem.com",
+      "www.smartone.com", "www.clp.com.hk", "www.bochk.com", "www.hsbc.com.hk", "www.hangseng.com",
+      "www.hkpost.hk", "www.hku.hk", "www.cuhk.edu.hk", "www.polyu.edu.hk", "www.cityu.edu.hk",
+      "www.hkust.edu.hk", "www.hkia.com.hk", "www.mtr.com.hk", "www.oceanpark.com.hk", "www.hongkongdisneyland.com",
+      "www.scmp.com", "www.hket.com", "www.stheadline.com", "www.openrice.com", "www.hktvmall.com",
+      "www.octopus.com.hk", "www.westkowloon.hk", "www.lcsd.gov.hk", "www.info.gov.hk", "www.hkma.gov.hk",
+      "www.hkich.org.hk", "www.hktdc.com"
+    ],
+    "JP": [
+      "www.sony.jp", "www.rakuten.co.jp", "www.nintendo.co.jp", "www.u-tokyo.ac.jp", "www.toyota.co.jp",
+      "www.canon.jp", "www.ana.co.jp", "www.softbank.jp", "www.lovelive-anime.jp", "www.panasonic.jp",
+      "www.hitachi.co.jp", "www.toshiba.co.jp", "www.mitsubishielectric.co.jp", "www.honda.co.jp", "www.fujitsu.com",
+      "www.nec.com", "www.sharp.co.jp", "www.casio.co.jp", "www.muji.com", "www.uniqlo.com",
+      "www.asahi.com", "www.yomiuri.co.jp", "www.nikkei.com", "www.nhk.or.jp", "www.ntt.com",
+      "www.kddi.com", "www.mizuhogroup.com", "www.mufg.jp", "www.smbc.co.jp", "www.post.japanpost.jp",
+      "www.jreast.co.jp", "www.jal.co.jp", "www.kyoto-u.ac.jp"
+    ],
+    "TW": [
+      "www.tsmc.com", "www.asus.com", "www.acer.com", "www.msi.com", "www.gigabyte.com",
+      "www.mediatek.com", "www.foxconn.com", "www.cht.com.tw", "www.taiwanmobile.com", "www.fetnet.net",
+      "www.cathaybk.com.tw", "www.ctbcbank.com", "www.esunbank.com.tw", "www.firstbank.com.tw", "www.twnp.com.tw",
+      "www.ntu.edu.tw", "www.nthu.edu.tw", "www.ncku.edu.tw", "www.nycu.edu.tw", "www.taipei",
+      "www.gov.tw", "www.customs.gov.tw", "www.post.gov.tw", "www.china-airlines.com", "www.evaair.com",
+      "www.pchome.com.tw", "www.momo.com.tw", "www.shopee.tw", "www.books.com.tw", "www.kkbox.com",
+      "www.line-website.com", "www.pixnet.net", "www.gamer.com.tw"
+    ],
+    "US": [
+      "www.nvidia.com", "www.intel.com", "www.dell.com", "www.hp.com", "www.cisco.com",
+      "www.tesla.com", "www.adidas.com", "www.nike.com", "www.ebay.com", "www.visa.com",
+      "www.mastercard.us", "www.americanexpress.com", "www.jpmorganchase.com", "www.bankofamerica.com", "www.wellsfargo.com",
+      "www.walmart.com", "www.target.com", "www.bestbuy.com", "www.costco.com", "www.starbucks.com",
+      "www.mcdonalds.com", "www.cocacola.com", "www.ford.com", "www.gm.com", "www.boeing.com",
+      "www.harvard.edu", "www.stanford.edu", "www.mit.edu", "www.berkeley.edu", "www.nytimes.com",
+      "www.wsj.com", "www.washingtonpost.com", "www.bloomberg.com"
+    ],
+    "SG": [
+      "www.singtel.com", "www.grab.com", "www.dbs.com.sg", "www.uobgroup.com", "www.shopee.sg",
+      "www.visitsingapore.com", "www.straitstimes.com", "www.channelnewsasia.com", "www.nus.edu.sg", "www.ntu.edu.sg",
+      "www.smu.edu.sg", "www.singaporeair.com", "www.changiairport.com", "www.lazada.sg", "www.fairprice.com.sg",
+      "www.ocbc.com", "www.temasek.com.sg", "www.m1.com.sg", "www.starhub.com", "www.gov.sg",
+      "www.cpf.gov.sg", "www.iras.gov.sg", "www.hdb.gov.sg", "www.ica.gov.sg", "www.mot.gov.sg",
+      "www.sgx.com", "www.marinabaysands.com", "www.rwsentosa.com", "www.comfortdelgro.com", "www.breadtalk.com",
+      "www.uob.com.sg", "www.raffles.com"
+    ],
+    "KR": [
+      "www.samsung.com", "www.hyundai.com", "www.lg.com", "www.kakao.com", "www.naver.com",
+      "www.sk.com", "www.skhynix.com", "www.posco.com", "www.kia.com", "www.lotte.co.kr",
+      "www.asiana.com", "www.koreanair.com", "www.shinhan.com", "www.kbstar.com", "www.wooribank.com",
+      "www.hana-cupid.com", "www.ibk.co.kr", "www.snu.ac.kr", "www.kaist.ac.kr", "www.yonsei.ac.kr",
+      "www.korea.ac.kr", "www.seoul.go.kr", "www.korea.go.kr", "www.coupang.com", "www.gmarket.co.kr",
+      "www.11st.co.kr", "www.interpark.com", "www.danawa.com", "www.tmon.co.kr", "www.wemakeprice.com",
+      "www.kt.com", "www.uplus.co.kr", "www.daum.net"
+    ],
+    "GLOBAL": [
+      "www.microsoft.com", "www.apple.com", "www.amazon.com", "www.cloudflare.com", "www.icloud.com",
+      "www.twitch.tv", "www.zoom.us", "www.github.com", "www.digitalocean.com", "www.adobe.com",
+      "www.oracle.com", "www.salesforce.com", "www.ibm.com", "www.sap.com", "www.vmware.com",
+      "www.autodesk.com", "www.spotify.com", "www.netflix.com", "www.disneyplus.com", "www.dropbox.com",
+      "www.slack.com", "www.zoom.com", "www.webex.com", "www.shopify.com", "www.wordpress.com",
+      "www.vimeo.com", "www.reddit.com", "www.quora.com", "www.medium.com", "www.u-next.jp",
+      "www.stripe.com", "www.paypal.com", "www.airbnb.com"
+    ]
+  }
+}
