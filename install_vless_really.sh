@@ -68,8 +68,8 @@ echo "本次随机选择的伪装域名为: $DEST_DOMAIN"
 XRAY_BIN="/usr/local/bin/xray"
 UUID=$($XRAY_BIN uuid)
 KEYS=$($XRAY_BIN x25519)
-PRIVATE_KEY=$(echo "$KEYS" | grep "Private key" | awk '{print $3}')
-PUBLIC_KEY=$(echo "$KEYS" | grep "Public key" | awk '{print $3}')
+PRIVATE_KEY=$(echo "$KEYS" | grep "PrivateKey" | cut -d: -f2 | tr -d ' ')
+PUBLIC_KEY=$(echo "$KEYS" | grep "Hash32" | cut -d: -f2 | tr -d ' ')
 SHORT_ID=$(openssl rand -hex 4)
 SERVER_IP=$(curl -s ifconfig.me)
 
