@@ -21,18 +21,35 @@ fi
 # 2. 安装基础依赖
 if [ "$OS" == "alpine" ]; then
     apk update
-    $PKGMGR curl openssl ca-certificates bash
+    $PKGMGR curl openssl ca-certificates bash unzip libc6-compat gcompat
 else
     apt-get update
-    $PKGMGR curl openssl ca-certificates
+    $PKGMGR curl openssl ca-certificates unzip
 fi
 
 # 3. 安装 Xray-core
 echo "正在安装 Xray-core..."
-bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+if [ "$OS" == "alpine" ]; then
+    # Alpine 手动下载，绕过官方脚本对 systemd 的检查
+    ARCH=$(uname -m)
+    case $ARCH in
+        x86_64)  X_ARCH="64" ;;
+        aarch64) X_ARCH="arm64-v8a" ;;
+        *) echo "不支持的架构: $ARCH"; exit 1 ;;
+    esac
+    mkdir -p /tmp/xray
+    curl -L -o /tmp/xray/xray.zip "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-$X_ARCH.zip"
+    unzip -o /tmp/xray/xray.zip -d /tmp/xray
+    mkdir -p /usr/local/bin /usr/local/etc/xray
+    cp /tmp/xray/xray /usr/local/bin/xray
+    chmod +x /usr/local/bin/xray
+    rm -rf /tmp/xray
+else
+    # Debian/Ubuntu 使用官方脚本
+    bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+fi
 
-# 4. 随机选择伪装域名 (Reality Dest)
-# 筛选标准：支持 TLSv1.3 + H2，指纹特征明显
+# 4. 随机选择伪装域名
 DOMAINS=(
     "www.loewe.com"
     "www.apple.com"
@@ -48,8 +65,9 @@ DEST_DOMAIN=${DOMAINS[$RANDOM % ${#DOMAINS[@]}]}
 echo "本次随机选择的伪装域名为: $DEST_DOMAIN"
 
 # 5. 生成配置参数
-UUID=$(/usr/local/bin/xray uuid)
-KEYS=$(/usr/local/bin/xray x25519)
+XRAY_BIN="/usr/local/bin/xray"
+UUID=$($XRAY_BIN uuid)
+KEYS=$($XRAY_BIN x25519)
 PRIVATE_KEY=$(echo "$KEYS" | grep "Private key" | awk '{print $3}')
 PUBLIC_KEY=$(echo "$KEYS" | grep "Public key" | awk '{print $3}')
 SHORT_ID=$(openssl rand -hex 4)
@@ -98,7 +116,7 @@ command_background="yes"
 EORC
         chmod +x /etc/init.d/xray
     fi
-    rc-update add xray
+    rc-update add xray default
     rc-service xray restart
 else
     systemctl enable xray
