@@ -127,7 +127,6 @@ fi
 VLESS_URL="vless://$UUID@$SERVER_IP:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$DEST_DOMAIN&fp=chrome&pbk=$PUBLIC_KEY&sid=$SHORT_ID&type=tcp#VLESS_Reality_$DEST_DOMAIN"
 
 # 9. 输出结果
-clear
 echo "========================================"
 echo "      VLESS + Reality 安装成功!  "
 echo "========================================"
