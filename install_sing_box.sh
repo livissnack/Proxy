@@ -190,6 +190,7 @@ select_ss_method() {
     info "=== 选择 Shadowsocks 加密方式 ==="
     echo "1) 2022-blake3-aes-128-gcm (推荐)"
     echo "2) aes-128-gcm"
+    echo "3) aes-256-gcm"
     echo ""
     echo "请输入选择(默认为 1):"
     read -r ss_method_choice
@@ -197,6 +198,7 @@ select_ss_method() {
     case "${ss_method_choice:-1}" in
         1) SS_METHOD="2022-blake3-aes-128-gcm" ;;
         2) SS_METHOD="aes-128-gcm" ;;
+        3) SS_METHOD="aes-256-gcm" ;;
         *)
             warn "无效选择，使用默认方式: 2022-blake3-aes-128-gcm"
             SS_METHOD="2022-blake3-aes-128-gcm"
