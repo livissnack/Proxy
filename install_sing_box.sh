@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
+#
+# 支持系统: Alpine; Debian/Ubuntu; RHEL 系（含 AlmaLinux 8–10、Rocky Linux、CentOS Stream、
+# Fedora、Oracle Linux 等，依据 /etc/os-release 的 ID 与 ID_LIKE 识别）
+#
 
 # -----------------------
 # 彩色输出函数
@@ -8,7 +12,7 @@ warn() { echo -e "\033[1;33m[WARN]\033[0m $*"; }
 err()  { echo -e "\033[1;31m[ERR]\033[0m $*" >&2; }
 
 # -----------------------
-# 检测系统类型
+# 检测系统类型（RHEL 系含 AlmaLinux / Rocky：既看 ID 也看 ID_LIKE）
 detect_os() {
     if [ -f /etc/os-release ]; then
         . /etc/os-release
@@ -19,14 +23,27 @@ detect_os() {
         OS_ID_LIKE=""
     fi
 
-    if echo "$OS_ID $OS_ID_LIKE" | grep -qi "alpine"; then
+    local os_line="${OS_ID} ${OS_ID_LIKE}"
+    if echo "$os_line" | grep -qi "alpine"; then
         OS="alpine"
-    elif echo "$OS_ID $OS_ID_LIKE" | grep -Ei "debian|ubuntu" >/dev/null; then
+    elif echo "$os_line" | grep -Eiq "debian|ubuntu"; then
         OS="debian"
-    elif echo "$OS_ID $OS_ID_LIKE" | grep -Ei "centos|rhel|fedora" >/dev/null; then
+    elif echo "$os_line" | grep -Eiq "almalinux|rocky|centos|rhel|fedora|ol|oracle|eurolinux|openeuler"; then
         OS="redhat"
     else
         OS="unknown"
+    fi
+}
+
+# RHEL 系包管理：优先 dnf（AlmaLinux 8+ / RHEL 8+），回退 yum
+redhat_install_pkg() {
+    if command -v dnf >/dev/null 2>&1; then
+        dnf install -y "$@" || return 1
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y "$@" || return 1
+    else
+        err "未找到 dnf 或 yum，无法安装依赖"
+        return 1
     fi
 }
 
@@ -67,8 +84,8 @@ install_deps() {
             }
             ;;
         redhat)
-            yum install -y curl ca-certificates openssl jq || {
-                err "依赖安装失败"
+            redhat_install_pkg curl ca-certificates openssl jq coreutils || {
+                err "依赖安装失败（请检查仓库网络与权限）"
                 exit 1
             }
             ;;
@@ -731,7 +748,52 @@ SYSTEMD
     info "服务配置完成: $SERVICE_PATH"
 }
 
+# AlmaLinux / RHEL：firewalld 常默认启用，自动放行本脚本部署的监听端口（云厂商安全组仍需自行放行）
+open_firewalld_for_singbox() {
+    [ "$OS" != "redhat" ] && return 0
+    command -v firewall-cmd >/dev/null 2>&1 || return 0
+    if ! firewall-cmd --state >/dev/null 2>&1; then
+        return 0
+    fi
+    if ! firewall-cmd --state 2>/dev/null | grep -qi running; then
+        return 0
+    fi
+
+    info "firewalld 运行中，正在永久放行 sing-box 相关端口..."
+    _fw_port() {
+        local p="$1"
+        local proto="$2"
+        [ -z "$p" ] && return 0
+        if firewall-cmd --permanent --add-port="${p}/${proto}" >/dev/null 2>&1; then
+            info "  已添加 ${p}/${proto}"
+        else
+            warn "  添加 ${p}/${proto} 跳过或失败（可能已存在）"
+        fi
+    }
+
+    $ENABLE_SS && {
+        _fw_port "${PORT_SS:-}" tcp
+        _fw_port "${PORT_SS:-}" udp
+    }
+    $ENABLE_HY2 && {
+        _fw_port "${PORT_HY2:-}" udp
+        _fw_port "${PORT_HY2:-}" tcp
+    }
+    $ENABLE_TUIC && {
+        _fw_port "${PORT_TUIC:-}" udp
+        _fw_port "${PORT_TUIC:-}" tcp
+    }
+    $ENABLE_REALITY && _fw_port "${PORT_REALITY:-}" tcp
+
+    if firewall-cmd --reload >/dev/null 2>&1; then
+        info "firewalld 已 reload，端口规则生效"
+    else
+        warn "firewall-cmd --reload 失败，请手动执行: firewall-cmd --reload"
+    fi
+}
+
 setup_service
+open_firewalld_for_singbox
 
 # -----------------------
 # 获取公网 IP
@@ -841,6 +903,10 @@ else
     echo "   状态: systemctl status sing-box"
     echo "   日志: journalctl -u sing-box -f"
 fi
+if [ "$OS" = "redhat" ]; then
+    echo ""
+    info "🛡️  AlmaLinux / RHEL 系: 本脚本已在 firewalld 运行时尝试放行上述端口；云服务器请在控制台同步放行安全组。SELinux Enforcing 若拦截可执行: ausearch -m avc -ts recent 排查。"
+fi
 echo ""
 echo "=========================================="
 
@@ -861,7 +927,7 @@ CONFIG_PATH="/etc/sing-box/config.json"
 CACHE_FILE="/etc/sing-box/.config_cache"
 SERVICE_NAME="sing-box"
 
-# 检测系统
+# 检测系统（与主安装脚本一致，支持 AlmaLinux / Rocky 等）
 detect_os() {
     if [ -f /etc/os-release ]; then
         . /etc/os-release
@@ -872,11 +938,12 @@ detect_os() {
         ID_LIKE=""
     fi
 
-    if echo "$ID $ID_LIKE" | grep -qi "alpine"; then
+    local os_line="${ID} ${ID_LIKE}"
+    if echo "$os_line" | grep -qi "alpine"; then
         OS="alpine"
-    elif echo "$ID $ID_LIKE" | grep -Ei "debian|ubuntu" >/dev/null; then
+    elif echo "$os_line" | grep -Eiq "debian|ubuntu"; then
         OS="debian"
-    elif echo "$ID $ID_LIKE" | grep -Ei "centos|rhel|fedora" >/dev/null; then
+    elif echo "$os_line" | grep -Eiq "almalinux|rocky|centos|rhel|fedora|ol|oracle|eurolinux|openeuler"; then
         OS="redhat"
     else
         OS="unknown"
@@ -1193,7 +1260,14 @@ action_uninstall() {
         systemctl disable sing-box 2>/dev/null || true
         rm -f /etc/systemd/system/sing-box.service
         systemctl daemon-reload 2>/dev/null || true
-        apt purge -y sing-box >/dev/null 2>&1 || true
+        if command -v apt-get >/dev/null 2>&1; then
+            DEBIAN_FRONTEND=noninteractive apt-get purge -y sing-box >/dev/null 2>&1 || true
+        fi
+        if command -v dnf >/dev/null 2>&1; then
+            dnf remove -y sing-box >/dev/null 2>&1 || true
+        elif command -v yum >/dev/null 2>&1; then
+            yum remove -y sing-box >/dev/null 2>&1 || true
+        fi
     fi
     rm -rf /etc/sing-box /var/log/sing-box* /usr/local/bin/sb /usr/bin/sing-box /root/node_names.txt 2>/dev/null || true
     info "卸载完成"
@@ -1286,21 +1360,40 @@ err()  { echo -e "\033[1;31m[ERR]\033[0m $*" >&2; }
 [ "$(id -u)" != "0" ] && err "必须以 root 运行" && exit 1
 
 detect_os(){
-    . /etc/os-release 2>/dev/null || true
-    case "${ID:-}" in
-        alpine) OS=alpine ;;
-        debian|ubuntu) OS=debian ;;
-        centos|rhel|fedora) OS=redhat ;;
-        *) OS=unknown ;;
-    esac
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+    fi
+    local i="${ID:-}"
+    local l="${ID_LIKE:-}"
+    local os_line="$i $l"
+    if echo "$os_line" | grep -qi "alpine"; then
+        OS=alpine
+    elif echo "$os_line" | grep -Eiq "debian|ubuntu"; then
+        OS=debian
+    elif echo "$os_line" | grep -Eiq "almalinux|rocky|centos|rhel|fedora|ol|oracle|eurolinux|openeuler"; then
+        OS=redhat
+    else
+        OS=unknown
+    fi
 }
 detect_os
 
 info "安装依赖..."
 case "$OS" in
-    alpine) apk update; apk add --no-cache curl jq bash openssl ca-certificates ;;
-    debian) apt-get update -y; apt-get install -y curl jq bash openssl ca-certificates ;;
-    redhat) yum install -y curl jq bash openssl ca-certificates ;;
+    alpine) apk update; apk add --no-cache curl jq bash openssl ca-certificates coreutils ;;
+    debian) apt-get update -y; apt-get install -y curl jq bash openssl ca-certificates coreutils ;;
+    redhat)
+        if command -v dnf >/dev/null 2>&1; then
+            dnf install -y curl jq bash openssl ca-certificates coreutils
+        elif command -v yum >/dev/null 2>&1; then
+            yum install -y curl jq bash openssl ca-certificates coreutils
+        else
+            err "未找到 dnf/yum"; exit 1
+        fi
+        ;;
+    *)
+        err "不支持的系统: ${ID:-unknown}"; exit 1
+        ;;
 esac
 
 info "安装 sing-box..."
