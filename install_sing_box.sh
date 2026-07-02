@@ -74,7 +74,209 @@ service_cmd() {
 }
 
 resolve_singbox_bin() {
-    command -v sing-box 2>/dev/null || echo "/usr/bin/sing-box"
+    if command -v sing-box >/dev/null 2>&1; then
+        command -v sing-box
+    elif [ -x /usr/local/bin/sing-box ]; then
+        echo /usr/local/bin/sing-box
+    else
+        echo /usr/local/bin/sing-box
+    fi
+}
+
+detect_arch() {
+    case "$(uname -m)" in
+        x86_64|amd64) echo "amd64" ;;
+        aarch64|arm64) echo "arm64" ;;
+        armv7l|armv6l|armhf) echo "armv7" ;;
+        *)
+            err "不支持的 CPU 架构: $(uname -m)"
+            exit 1
+            ;;
+    esac
+}
+
+DOWNLOAD_PROXY="${DOWNLOAD_PROXY:-${HTTPS_PROXY:-}}"
+SINGBOX_PREFETCH_DIR=""
+SINGBOX_PREFETCH_PID=""
+PREFETCH_IP_FILE=""
+IP_PREFETCH_PID=""
+
+_wget() {
+    local args=(--no-check-certificate)
+    [ -n "$DOWNLOAD_PROXY" ] && args=(-e "$DOWNLOAD_PROXY" "${args[@]}")
+    wget "${args[@]}" "$@"
+}
+
+_download_to_file() {
+    local url="$1" dest="$2"
+    if command -v wget >/dev/null 2>&1; then
+        _wget -t 3 -q -c "$url" -O "$dest"
+    elif command -v curl >/dev/null 2>&1; then
+        curl -fsSL --retry 3 -C - -o "$dest" "$url"
+    else
+        err "需要 wget 或 curl 以下载 sing-box（脚本不会执行 apt/apk update）"
+        exit 1
+    fi
+}
+
+download_stream() {
+    local url="$1"
+    if command -v wget >/dev/null 2>&1; then
+        _wget -qO- "$url"
+    elif command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$url"
+    else
+        err "需要 wget 或 curl 以下载 sing-box（脚本不会执行 apt/apk update）"
+        exit 1
+    fi
+}
+
+ensure_minimal_tools() {
+    if ! command -v wget >/dev/null 2>&1 && ! command -v curl >/dev/null 2>&1; then
+        err "未找到 wget 或 curl，无法下载 sing-box。请手动安装其中之一后重试。"
+        err "提示：脚本不会执行 apt-get update / apk update。"
+        exit 1
+    fi
+    if ! command -v tar >/dev/null 2>&1; then
+        err "未找到 tar，无法解压 sing-box 安装包"
+        exit 1
+    fi
+}
+
+json_escape() {
+    local s=$1
+    s=${s//\\/\\\\}
+    s=${s//\"/\\\"}
+    s=${s//$'\n'/\\n}
+    s=${s//$'\r'/\\r}
+    s=${s//$'\t'/\\t}
+    printf '%s' "$s"
+}
+
+fetch_singbox_latest_version() {
+    download_stream "https://api.github.com/repos/Sagernet/sing-box/releases/latest?v=$RANDOM" \
+        | grep tag_name | grep -Eo 'v[0-9.]+' | head -1 | tr -d 'v'
+}
+
+ensure_alpine_gcompat() {
+    [ "$OS" != "alpine" ] && return 0
+    if "$SING_BOX_BIN" version >/dev/null 2>&1; then
+        return 0
+    fi
+    warn "Alpine 需要 gcompat 才能运行 sing-box 预编译包，尝试安装..."
+    if apk add --no-cache gcompat 2>/dev/null; then
+        info "gcompat 安装成功"
+    else
+        warn "请手动执行: apk add gcompat"
+    fi
+}
+
+install_singbox_from_dir() {
+    local dir="$1" version="$2"
+    if [ ! -x "$dir/sing-box" ]; then
+        err "安装包中未找到 sing-box 可执行文件"
+    fi
+    install -m 755 "$dir/sing-box" /usr/local/bin/sing-box
+    ln -sf /usr/local/bin/sing-box /usr/bin/sing-box 2>/dev/null || true
+    SING_BOX_BIN="/usr/local/bin/sing-box"
+    ensure_alpine_gcompat
+    if ! "$SING_BOX_BIN" version >/dev/null 2>&1; then
+        err "sing-box 安装后无法运行: $SING_BOX_BIN"
+    fi
+    succ "sing-box v${version} 安装完成"
+}
+
+install_singbox_binary_sync() {
+    local force="${1:-false}"
+    SING_BOX_BIN="$(resolve_singbox_bin)"
+
+    if [ "$force" != "true" ] && [ -x "$SING_BOX_BIN" ]; then
+        info "sing-box 已安装: $SING_BOX_BIN"
+        return 0
+    fi
+
+    local arch version url tmpdir tarball
+    arch="$(detect_arch)"
+    info "从 GitHub 官方 Release 下载 sing-box (linux-${arch})..."
+    version="$(fetch_singbox_latest_version)"
+    if [ -z "$version" ]; then
+        err "无法获取 sing-box 最新版本号，请检查网络或 GitHub 访问"
+    fi
+
+    url="https://github.com/Sagernet/sing-box/releases/download/v${version}/sing-box-${version}-linux-${arch}.tar.gz"
+    tmpdir="$(mktemp -d)"
+    tarball="$tmpdir/sing-box.tar.gz"
+    if ! _download_to_file "$url" "$tarball"; then
+        rm -rf "$tmpdir"
+        err "sing-box 下载失败: $url"
+    fi
+    if ! tar zxf "$tarball" --strip-components 1 -C "$tmpdir"; then
+        rm -rf "$tmpdir"
+        err "sing-box 解压失败"
+    fi
+    install_singbox_from_dir "$tmpdir" "$version"
+    rm -rf "$tmpdir"
+}
+
+start_singbox_prefetch() {
+    local bin
+    bin="$(resolve_singbox_bin)"
+    if [ -x "$bin" ]; then
+        SING_BOX_BIN="$bin"
+        return 0
+    fi
+
+    SINGBOX_PREFETCH_DIR="$(mktemp -d)"
+    info "后台下载 sing-box（交互配置时可并行进行）..."
+    (
+        local arch version url tarball
+        arch="$(detect_arch)"
+        version="$(fetch_singbox_latest_version)" || exit 1
+        url="https://github.com/Sagernet/sing-box/releases/download/v${version}/sing-box-${version}-linux-${arch}.tar.gz"
+        tarball="$SINGBOX_PREFETCH_DIR/sing-box.tar.gz"
+        _download_to_file "$url" "$tarball" || exit 1
+        tar zxf "$tarball" --strip-components 1 -C "$SINGBOX_PREFETCH_DIR" || exit 1
+        echo "$version" > "$SINGBOX_PREFETCH_DIR/.version"
+        touch "$SINGBOX_PREFETCH_DIR/.ok"
+    ) &
+    SINGBOX_PREFETCH_PID=$!
+}
+
+finish_singbox_install() {
+    local force="${1:-false}"
+    local bin
+    bin="$(resolve_singbox_bin)"
+
+    if [ "$force" != "true" ] && [ -x "$bin" ] && [ -z "$SINGBOX_PREFETCH_PID" ]; then
+        SING_BOX_BIN="$bin"
+        info "sing-box 已安装: $SING_BOX_BIN"
+        return 0
+    fi
+
+    if [ -n "$SINGBOX_PREFETCH_PID" ]; then
+        wait "$SINGBOX_PREFETCH_PID" || {
+            rm -rf "$SINGBOX_PREFETCH_DIR"
+            err "sing-box 后台下载失败，请检查 GitHub 网络"
+        }
+        if [ -f "$SINGBOX_PREFETCH_DIR/.ok" ]; then
+            install_singbox_from_dir "$SINGBOX_PREFETCH_DIR" "$(cat "$SINGBOX_PREFETCH_DIR/.version")"
+            rm -rf "$SINGBOX_PREFETCH_DIR"
+            SINGBOX_PREFETCH_PID=""
+            return 0
+        fi
+        rm -rf "$SINGBOX_PREFETCH_DIR"
+    fi
+
+    install_singbox_binary_sync "$force"
+}
+
+start_ip_prefetch() {
+    [ -n "${CUSTOM_IP:-}" ] && return 0
+    PREFETCH_IP_FILE="$(mktemp)"
+    (
+        get_public_ip > "$PREFETCH_IP_FILE"
+    ) &
+    IP_PREFETCH_PID=$!
 }
 
 # 检测系统类型
@@ -100,43 +302,11 @@ detect_os() {
     fi
 }
 
-redhat_install_pkg() {
-    if command -v dnf >/dev/null 2>&1; then
-        dnf install -y "$@" || return 1
-    elif command -v yum >/dev/null 2>&1; then
-        yum install -y "$@" || return 1
-    else
-        err "未找到 dnf 或 yum，无法安装依赖"
-        return 1
-    fi
-}
-
 check_root() {
     if [ "$(id -u)" != "0" ]; then
         err "此脚本需要 root 权限"
         exit 1
     fi
-}
-
-install_deps() {
-    info "安装系统依赖..."
-    case "$OS" in
-        alpine)
-            apk update || { err "apk update 失败"; exit 1; }
-            apk add --no-cache bash curl ca-certificates openssl openrc jq || { err "依赖安装失败"; exit 1; }
-            ;;
-        debian)
-            export DEBIAN_FRONTEND=noninteractive
-            apt-get update -y || { err "apt update 失败"; exit 1; }
-            apt-get install -y curl ca-certificates openssl jq || { err "依赖安装失败"; exit 1; }
-            ;;
-        redhat)
-            redhat_install_pkg curl ca-certificates openssl jq coreutils || { err "依赖安装失败"; exit 1; }
-            ;;
-        *)
-            warn "未识别的系统类型,尝试继续..."
-            ;;
-    esac
 }
 
 # -----------------------
@@ -280,29 +450,9 @@ get_config() {
     fi
 }
 
-# 安装 sing-box 本体
+# 安装 sing-box 本体（GitHub 官方 Release，后台预下载 + 直装）
 install_singbox() {
-    if command -v sing-box >/dev/null 2>&1; then
-        SING_BOX_BIN="$(resolve_singbox_bin)"
-        return 0
-    fi
-    info "开始安装 sing-box..."
-    case "$OS" in
-        alpine)
-            apk add --repository=http://dl-cdn.alpinelinux.org/alpine/edge/community sing-box || exit 1
-            ;;
-        debian|redhat)
-            bash <(curl -fsSL https://sing-box.app/install.sh) || exit 1
-            ;;
-        *)
-            err "不支持的系统"; exit 1
-            ;;
-    esac
-    SING_BOX_BIN="$(resolve_singbox_bin)"
-    if [ ! -x "$SING_BOX_BIN" ]; then
-        err "sing-box 安装后未找到可执行文件: $SING_BOX_BIN"
-        exit 1
-    fi
+    finish_singbox_install false
 }
 
 generate_reality_keys() {
@@ -323,6 +473,10 @@ generate_reality_keys() {
 
 generate_cert() {
     if ! $ENABLE_HY2 && ! $ENABLE_TUIC; then return 0; fi
+    if ! command -v openssl >/dev/null 2>&1; then
+        err "HY2/TUIC 需要 openssl 生成 TLS 证书，请安装 openssl 后重试"
+        exit 1
+    fi
     mkdir -p /etc/sing-box/certs
     if [ ! -f /etc/sing-box/certs/fullchain.pem ]; then
         openssl req -x509 -newkey rsa:2048 -nodes \
@@ -332,45 +486,41 @@ generate_cert() {
     fi
 }
 
-# 生成配置文件 (通过高内聚的 JSON 拼接生成)
+# 生成配置文件（纯 bash 拼接 JSON，无需 jq）
 create_config() {
     info "生成配置文件: $CONFIG_PATH"
-    local TEMP_INBOUNDS="/tmp/sb_inbounds_tmp.json"
-    echo "[]" > "$TEMP_INBOUNDS"
+    local items="" comma=""
 
     if $ENABLE_SS; then
         SS_METHOD="${SS_METHOD:-2022-blake3-aes-128-gcm}"
-        jq --argjson port "$SS_PORT" --arg method "$SS_METHOD" --arg psk "$SS_PSK" \
-        '. += [{ "type": "shadowsocks", "listen": "::", "listen_port": $port, "method": $method, "password": $psk, "tag": "ss-in" }]' \
-        "$TEMP_INBOUNDS" > "$TEMP_INBOUNDS.bak" && mv "$TEMP_INBOUNDS.bak" "$TEMP_INBOUNDS"
+        items+="${comma}{\"type\":\"shadowsocks\",\"listen\":\"::\",\"listen_port\":${SS_PORT},\"method\":\"$(json_escape "$SS_METHOD")\",\"password\":\"$(json_escape "$SS_PSK")\",\"tag\":\"ss-in\"}"
+        comma=","
     fi
 
     if $ENABLE_HY2; then
-        jq --argjson port "$HY2_PORT" --arg psk "$HY2_PSK" \
-        '. += [{ "type": "hysteria2", "tag": "hy2-in", "listen": "::", "listen_port": $port, "users": [{"password": $psk}], "tls": {"enabled": true, "alpn": ["h3"], "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"} }]' \
-        "$TEMP_INBOUNDS" > "$TEMP_INBOUNDS.bak" && mv "$TEMP_INBOUNDS.bak" "$TEMP_INBOUNDS"
+        items+="${comma}{\"type\":\"hysteria2\",\"tag\":\"hy2-in\",\"listen\":\"::\",\"listen_port\":${HY2_PORT},\"users\":[{\"password\":\"$(json_escape "$HY2_PSK")\"}],\"tls\":{\"enabled\":true,\"alpn\":[\"h3\"],\"certificate_path\":\"/etc/sing-box/certs/fullchain.pem\",\"key_path\":\"/etc/sing-box/certs/privkey.pem\"}}"
+        comma=","
     fi
 
     if $ENABLE_TUIC; then
-        jq --argjson port "$TUIC_PORT" --arg uuid "$TUIC_UUID" --arg psk "$TUIC_PSK" \
-        '. += [{ "type": "tuic", "tag": "tuic-in", "listen": "::", "listen_port": $port, "users": [{"uuid": $uuid, "password": $psk}], "congestion_control": "bbr", "tls": {"enabled": true, "alpn": ["h3"], "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"} }]' \
-        "$TEMP_INBOUNDS" > "$TEMP_INBOUNDS.bak" && mv "$TEMP_INBOUNDS.bak" "$TEMP_INBOUNDS"
+        items+="${comma}{\"type\":\"tuic\",\"tag\":\"tuic-in\",\"listen\":\"::\",\"listen_port\":${TUIC_PORT},\"users\":[{\"uuid\":\"$(json_escape "$TUIC_UUID")\",\"password\":\"$(json_escape "$TUIC_PSK")\"}],\"congestion_control\":\"bbr\",\"tls\":{\"enabled\":true,\"alpn\":[\"h3\"],\"certificate_path\":\"/etc/sing-box/certs/fullchain.pem\",\"key_path\":\"/etc/sing-box/certs/privkey.pem\"}}"
+        comma=","
     fi
 
     if $ENABLE_REALITY; then
-        jq --argjson port "$REALITY_PORT" --arg uuid "$REALITY_UUID" --arg sni "$REALITY_SNI" --arg pk "$REALITY_PK" --arg sid "$REALITY_SID" \
-        '. += [{ "type": "vless", "tag": "vless-in", "listen": "::", "listen_port": $port, "users": [{"uuid": $uuid, "flow": "xtls-rprx-vision"}], "tls": {"enabled": true, "server_name": $sni, "reality": {"enabled": true, "handshake": {"server": $sni, "server_port": 443}, "private_key": $pk, "short_id": [$sid]}} }]' \
-        "$TEMP_INBOUNDS" > "$TEMP_INBOUNDS.bak" && mv "$TEMP_INBOUNDS.bak" "$TEMP_INBOUNDS"
+        items+="${comma}{\"type\":\"vless\",\"tag\":\"vless-in\",\"listen\":\"::\",\"listen_port\":${REALITY_PORT},\"users\":[{\"uuid\":\"$(json_escape "$REALITY_UUID")\",\"flow\":\"xtls-rprx-vision\"}],\"tls\":{\"enabled\":true,\"server_name\":\"$(json_escape "$REALITY_SNI")\",\"reality\":{\"enabled\":true,\"handshake\":{\"server\":\"$(json_escape "$REALITY_SNI")\",\"server_port\":443},\"private_key\":\"$(json_escape "$REALITY_PK")\",\"short_id\":[\"$(json_escape "$REALITY_SID")\"]}}}"
     fi
 
-    # 组装完整主体
-    jq -n --argjson inbounds "$(<"$TEMP_INBOUNDS")" \
-    '{ log: { level: "info", timestamp: true }, inbounds: $inbounds, outbounds: [{ type: "direct", tag: "direct-out" }] }' \
-    > "$CONFIG_PATH"
-    rm -f "$TEMP_INBOUNDS"
+    cat > "$CONFIG_PATH" <<EOF
+{
+  "log": { "level": "info", "timestamp": true },
+  "inbounds": [${items}],
+  "outbounds": [{ "type": "direct", "tag": "direct-out" }]
+}
+EOF
 
     if ! "$SING_BOX_BIN" check -c "$CONFIG_PATH" >/dev/null 2>&1; then
-        err "配置文件校验失败，请检查 jq 生成的 JSON"
+        err "配置文件校验失败，请检查生成的 JSON"
         exit 1
     fi
 
@@ -478,10 +628,16 @@ open_firewall_ports() {
 
 get_public_ip() {
     local ip=""
-    for url in "https://api.ipify.org" "https://ipinfo.io/ip" "https://ifconfig.me" "https://icanhazip.com"; do
-        ip=$(curl -s --max-time 5 "$url" 2>/dev/null | tr -d '[:space:]' || true)
+    ip=$(download_stream "https://one.one.one.one/cdn-cgi/trace" 2>/dev/null | grep -m1 '^ip=' | cut -d= -f2 || true)
+    if [ -n "$ip" ] && [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "$ip"
+        return 0
+    fi
+    for url in "https://api.ipify.org" "https://ifconfig.me" "https://icanhazip.com"; do
+        ip=$(download_stream "$url" 2>/dev/null | tr -d '[:space:]' || true)
         if [ -n "$ip" ] && [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "$ip"; return 0
+            echo "$ip"
+            return 0
         fi
     done
     echo "YOUR_SERVER_IP"
@@ -490,15 +646,26 @@ get_public_ip() {
 resolve_pub_ip() {
     if [ -n "${CUSTOM_IP:-}" ]; then
         PUB_IP="$CUSTOM_IP"
-    else
-        PUB_IP=$(get_public_ip)
+        return 0
     fi
+    if [ -n "$IP_PREFETCH_PID" ]; then
+        wait "$IP_PREFETCH_PID" 2>/dev/null || true
+        IP_PREFETCH_PID=""
+    fi
+    if [ -n "$PREFETCH_IP_FILE" ] && [ -f "$PREFETCH_IP_FILE" ]; then
+        PUB_IP=$(cat "$PREFETCH_IP_FILE")
+        rm -f "$PREFETCH_IP_FILE"
+        PREFETCH_IP_FILE=""
+        return 0
+    fi
+    PUB_IP=$(get_public_ip)
 }
 
 main_install() {
     select_protocols
     select_ss_method
     prompt_network_settings
+    start_ip_prefetch
     get_config
     prompt_node_suffix
     install_singbox
@@ -650,8 +817,13 @@ while true; do
         6) systemctl restart sing-box 2>/dev/null || rc-service sing-box restart; info "服务已重启。" ;;
         7) systemctl status sing-box 2>/dev/null || rc-service sing-box status || true ;;
         8)
-            bash <(curl -fsSL https://sing-box.app/install.sh) 2>/dev/null || apk upgrade sing-box
+            if [ -f /root/install_sing_box.sh ]; then
+                bash /root/install_sing_box.sh --upgrade-singbox
+            else
+                warn "未找到安装脚本，请手动升级 sing-box"
+            fi
             systemctl restart sing-box 2>/dev/null || rc-service sing-box restart || true
+            info "sing-box 升级完成"
             ;;
         9)
             systemctl disable --now sing-box 2>/dev/null || rc-service sing-box stop || true
@@ -680,13 +852,20 @@ case "${1:-}" in
         output_format_result
         exit 0
         ;;
+    --upgrade-singbox)
+        detect_os
+        check_root
+        ensure_minimal_tools
+        install_singbox_binary_sync true
+        exit 0
+        ;;
 esac
 
 detect_os
 check_root
-install_deps
+ensure_minimal_tools
 load_state
-SING_BOX_BIN="$(resolve_singbox_bin)"
+start_singbox_prefetch
 
 main_install
 create_sb_panel
