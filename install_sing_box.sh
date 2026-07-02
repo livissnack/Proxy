@@ -74,73 +74,220 @@ service_cmd() {
 }
 
 resolve_singbox_bin() {
-    if command -v sing-box >/dev/null 2>&1; then
+    if [ -x /etc/sing-box/bin/sing-box ]; then
+        echo /etc/sing-box/bin/sing-box
+    elif command -v sing-box >/dev/null 2>&1; then
         command -v sing-box
     elif [ -x /usr/local/bin/sing-box ]; then
         echo /usr/local/bin/sing-box
     else
-        echo /usr/local/bin/sing-box
+        echo /etc/sing-box/bin/sing-box
     fi
 }
 
 detect_arch() {
     case "$(uname -m)" in
         x86_64|amd64) echo "amd64" ;;
-        aarch64|arm64) echo "arm64" ;;
-        armv7l|armv6l|armhf) echo "armv7" ;;
+        aarch64|arm64|*armv8*) echo "arm64" ;;
         *)
-            err "不支持的 CPU 架构: $(uname -m)"
-            exit 1
+            err "此脚本仅支持 64 位系统 (amd64/arm64): $(uname -m)"
             ;;
     esac
 }
 
-DOWNLOAD_PROXY="${DOWNLOAD_PROXY:-${HTTPS_PROXY:-}}"
-SINGBOX_PREFETCH_DIR=""
-SINGBOX_PREFETCH_PID=""
+# -----------------------
+# 233boy 风格：依赖检测 / wget 下载 / 后台预拉 sing-box
+IS_CORE_REPO="SagerNet/sing-box"
+PKG_CMD=""
+IS_WGET=""
+IS_SYSTEMD=""
+IS_OPENRC=""
+IS_ARCH=""
+BOOT_TMPDIR=""
+TMPCORE=""
+IS_CORE_OK=""
+IS_PKG_OK=""
+CORE_DL_PID=""
 PREFETCH_IP_FILE=""
 IP_PREFETCH_PID=""
+DOWNLOAD_PROXY="${DOWNLOAD_PROXY:-${HTTPS_PROXY:-}}"
 
 _wget() {
-    local args=(--no-check-certificate)
-    [ -n "$DOWNLOAD_PROXY" ] && args=(-e "$DOWNLOAD_PROXY" "${args[@]}")
-    wget "${args[@]}" "$@"
+    [ -n "$DOWNLOAD_PROXY" ] && export https_proxy="$DOWNLOAD_PROXY"
+    wget --no-check-certificate "$@"
 }
 
-_download_to_file() {
-    local url="$1" dest="$2"
-    if command -v wget >/dev/null 2>&1; then
-        _wget -t 3 -q -c "$url" -O "$dest"
-    elif command -v curl >/dev/null 2>&1; then
-        curl -fsSL --retry 3 -C - -o "$dest" "$url"
+init_bootstrap() {
+    IS_ARCH="$(detect_arch)"
+    PKG_CMD="$(type -P apt-get || type -P yum || type -P dnf || type -P zypper || type -P apk || true)"
+    IS_WGET="$(type -P wget || true)"
+    IS_SYSTEMD="$(type -P systemctl || true)"
+    IS_OPENRC="$(type -P rc-service || true)"
+
+    [ -n "$PKG_CMD" ] || err "不支持的操作系统 (需 Debian/Ubuntu/CentOS/Alpine 等)"
+    [ -n "$IS_SYSTEMD" ] || [ -n "$IS_OPENRC" ] || err "系统缺少 systemctl 或 rc-service，无法托管服务"
+
+    BOOT_TMPDIR="$(mktemp -d 2>/dev/null || echo "/tmp/sb-install-$$")"
+    TMPCORE="$BOOT_TMPDIR/sing-box.tgz"
+    IS_CORE_OK="$BOOT_TMPDIR/sing-box.ok"
+    IS_PKG_OK="$BOOT_TMPDIR/pkg.ok"
+    mkdir -p "$BOOT_TMPDIR"
+}
+
+required_pkgs() {
+    local pkgs="wget tar bash"
+    if [ "$OS" = "alpine" ]; then
+        pkgs="$pkgs gcompat openssl openrc"
+    fi
+    echo "$pkgs"
+}
+
+install_pkg() {
+    local missing="" pkg
+    for pkg in $(required_pkgs); do
+        type -P "$pkg" >/dev/null 2>&1 || missing="$missing $pkg"
+    done
+    if [ -z "$missing" ]; then
+        : >"$IS_PKG_OK"
+        return 0
+    fi
+    info "安装依赖:${missing}"
+    if [[ "$PKG_CMD" =~ apk ]]; then
+        apk update >/dev/null 2>&1 || { err "apk update 失败"; return 1; }
+        apk add --no-cache $missing >/dev/null 2>&1 || { err "Alpine 依赖安装失败，请手动: apk add$missing"; return 1; }
     else
-        err "需要 wget 或 curl 以下载 sing-box（脚本不会执行 apt/apk update）"
-        exit 1
+        $PKG_CMD install -y $missing >/dev/null 2>&1 || {
+            if [[ "$PKG_CMD" =~ yum ]] && type -P dnf >/dev/null 2>&1; then
+                dnf install -y $missing >/dev/null 2>&1 || return 1
+            else
+                [[ "$PKG_CMD" =~ yum ]] && yum install -y epel-release >/dev/null 2>&1 || true
+                if [[ "$PKG_CMD" =~ zypper ]]; then
+                    zypper --non-interactive refresh >/dev/null 2>&1 || true
+                else
+                    $PKG_CMD update -y >/dev/null 2>&1 || true
+                fi
+                $PKG_CMD install -y $missing >/dev/null 2>&1 || return 1
+            fi
+        }
     fi
+    : >"$IS_PKG_OK"
 }
 
-download_stream() {
-    local url="$1"
-    if command -v wget >/dev/null 2>&1; then
-        _wget -qO- "$url"
-    elif command -v curl >/dev/null 2>&1; then
-        curl -fsSL "$url"
+download_core() {
+    local ver link
+    ver="$(_wget -qO- "https://api.github.com/repos/${IS_CORE_REPO}/releases/latest?v=$RANDOM" \
+        | grep tag_name | grep -Eo 'v[0-9.]+' | head -1)"
+    [ -n "$ver" ] || return 1
+    link="https://github.com/${IS_CORE_REPO}/releases/download/${ver}/sing-box-${ver#v}-linux-${IS_ARCH}.tar.gz"
+    info "下载 sing-box > ${link}"
+    if _wget -t 3 -q -c "$link" -O "$TMPCORE"; then
+        mv -f "$TMPCORE" "$IS_CORE_OK"
+        echo "${ver#v}" > "$BOOT_TMPDIR/.version"
+        return 0
+    fi
+    return 1
+}
+
+get_ip() {
+    local ip_line ip=""
+    ip_line="$(_wget -4 -qO- https://one.one.one.one/cdn-cgi/trace 2>/dev/null | grep -m1 '^ip=' || true)"
+    [ -n "$ip_line" ] && ip="${ip_line#ip=}"
+    if [ -z "$ip" ]; then
+        ip_line="$(_wget -6 -qO- https://one.one.one.one/cdn-cgi/trace 2>/dev/null | grep -m1 '^ip=' || true)"
+        [ -n "$ip_line" ] && ip="${ip_line#ip=}"
+    fi
+    [ -n "$ip" ] && echo "$ip" > "$PREFETCH_IP_FILE"
+}
+
+bootstrap_start() {
+    init_bootstrap
+    if [[ "$PKG_CMD" =~ apk ]]; then
+        install_pkg || exit 1
     else
-        err "需要 wget 或 curl 以下载 sing-box（脚本不会执行 apt/apk update）"
-        exit 1
+        install_pkg &
+        local pkg_pid=$!
+        if [ ! -x "$(resolve_singbox_bin)" ]; then
+            info "后台下载 sing-box（填写配置时可并行进行）..."
+            download_core &
+            CORE_DL_PID=$!
+        fi
+        wait "$pkg_pid" || { err "依赖安装失败"; exit 1; }
+    fi
+
+    IS_WGET="$(type -P wget || true)"
+    [ -n "$IS_WGET" ] || err "wget 不可用，无法下载 sing-box"
+
+    if [ ! -x "$(resolve_singbox_bin)" ] && [ -z "$CORE_DL_PID" ]; then
+        info "后台下载 sing-box（填写配置时可并行进行）..."
+        download_core &
+        CORE_DL_PID=$!
     fi
 }
 
-ensure_minimal_tools() {
-    if ! command -v wget >/dev/null 2>&1 && ! command -v curl >/dev/null 2>&1; then
-        err "未找到 wget 或 curl，无法下载 sing-box。请手动安装其中之一后重试。"
-        err "提示：脚本不会执行 apt-get update / apk update。"
-        exit 1
+start_core_prefetch() {
+    [ -x "$(resolve_singbox_bin)" ] && return 0
+    [ -n "$CORE_DL_PID" ] && return 0
+    download_core &
+    CORE_DL_PID=$!
+}
+
+start_ip_prefetch() {
+    [ -n "${CUSTOM_IP:-}" ] && return 0
+    PREFETCH_IP_FILE="$BOOT_TMPDIR/public.ip"
+    get_ip &
+    IP_PREFETCH_PID=$!
+}
+
+install_core_from_cache() {
+    local extract_dir version
+    if [ -x "$(resolve_singbox_bin)" ]; then
+        SING_BOX_BIN="$(resolve_singbox_bin)"
+        info "sing-box 已安装: $SING_BOX_BIN"
+        return 0
     fi
-    if ! command -v tar >/dev/null 2>&1; then
-        err "未找到 tar，无法解压 sing-box 安装包"
-        exit 1
+
+    if [ -n "$CORE_DL_PID" ]; then
+        info "等待 sing-box 下载完成..."
+        wait "$CORE_DL_PID" || err "sing-box 下载失败，请检查 github.com 连通性"
+        CORE_DL_PID=""
     fi
+
+    [ -f "$IS_CORE_OK" ] || err "sing-box 安装包不存在，下载可能失败"
+
+    extract_dir="$BOOT_TMPDIR/extract"
+    mkdir -p "$extract_dir" /etc/sing-box/bin
+    tar zxf "$IS_CORE_OK" --strip-components 1 -C "$extract_dir" || err "sing-box 解压失败"
+    [ -x "$extract_dir/sing-box" ] || err "安装包中未找到 sing-box 可执行文件"
+
+    install -m 755 "$extract_dir/sing-box" /etc/sing-box/bin/sing-box
+    ln -sf /etc/sing-box/bin/sing-box /usr/local/bin/sing-box 2>/dev/null || true
+    ln -sf /etc/sing-box/bin/sing-box /usr/bin/sing-box 2>/dev/null || true
+    SING_BOX_BIN="/etc/sing-box/bin/sing-box"
+
+    if [ "$OS" = "alpine" ] && ! "$SING_BOX_BIN" version >/dev/null 2>&1; then
+        warn "Alpine 需 gcompat 运行 glibc 版 sing-box，正在检查..."
+        type -P gcompat >/dev/null 2>&1 || apk add --no-cache gcompat >/dev/null 2>&1 || true
+    fi
+    "$SING_BOX_BIN" version >/dev/null 2>&1 || err "sing-box 无法运行，Alpine 请确认已安装 gcompat"
+
+    version="$(cat "$BOOT_TMPDIR/.version" 2>/dev/null || "$SING_BOX_BIN" version 2>/dev/null | head -1)"
+    succ "sing-box 安装完成 ${version}"
+}
+
+install_singbox() {
+    install_core_from_cache
+}
+
+install_singbox_binary_sync() {
+    rm -f "$IS_CORE_OK" /etc/sing-box/bin/sing-box 2>/dev/null || true
+    info "重新下载 sing-box..."
+    download_core || err "sing-box 下载失败"
+    CORE_DL_PID=""
+    install_core_from_cache
+}
+
+bootstrap_cleanup() {
+    [ -n "$BOOT_TMPDIR" ] && [ -d "$BOOT_TMPDIR" ] && rm -rf "$BOOT_TMPDIR"
 }
 
 json_escape() {
@@ -151,132 +298,6 @@ json_escape() {
     s=${s//$'\r'/\\r}
     s=${s//$'\t'/\\t}
     printf '%s' "$s"
-}
-
-fetch_singbox_latest_version() {
-    download_stream "https://api.github.com/repos/Sagernet/sing-box/releases/latest?v=$RANDOM" \
-        | grep tag_name | grep -Eo 'v[0-9.]+' | head -1 | tr -d 'v'
-}
-
-ensure_alpine_gcompat() {
-    [ "$OS" != "alpine" ] && return 0
-    if "$SING_BOX_BIN" version >/dev/null 2>&1; then
-        return 0
-    fi
-    warn "Alpine 需要 gcompat 才能运行 sing-box 预编译包，尝试安装..."
-    if apk add --no-cache gcompat 2>/dev/null; then
-        info "gcompat 安装成功"
-    else
-        warn "请手动执行: apk add gcompat"
-    fi
-}
-
-install_singbox_from_dir() {
-    local dir="$1" version="$2"
-    if [ ! -x "$dir/sing-box" ]; then
-        err "安装包中未找到 sing-box 可执行文件"
-    fi
-    install -m 755 "$dir/sing-box" /usr/local/bin/sing-box
-    ln -sf /usr/local/bin/sing-box /usr/bin/sing-box 2>/dev/null || true
-    SING_BOX_BIN="/usr/local/bin/sing-box"
-    ensure_alpine_gcompat
-    if ! "$SING_BOX_BIN" version >/dev/null 2>&1; then
-        err "sing-box 安装后无法运行: $SING_BOX_BIN"
-    fi
-    succ "sing-box v${version} 安装完成"
-}
-
-install_singbox_binary_sync() {
-    local force="${1:-false}"
-    SING_BOX_BIN="$(resolve_singbox_bin)"
-
-    if [ "$force" != "true" ] && [ -x "$SING_BOX_BIN" ]; then
-        info "sing-box 已安装: $SING_BOX_BIN"
-        return 0
-    fi
-
-    local arch version url tmpdir tarball
-    arch="$(detect_arch)"
-    info "从 GitHub 官方 Release 下载 sing-box (linux-${arch})..."
-    version="$(fetch_singbox_latest_version)"
-    if [ -z "$version" ]; then
-        err "无法获取 sing-box 最新版本号，请检查网络或 GitHub 访问"
-    fi
-
-    url="https://github.com/Sagernet/sing-box/releases/download/v${version}/sing-box-${version}-linux-${arch}.tar.gz"
-    tmpdir="$(mktemp -d)"
-    tarball="$tmpdir/sing-box.tar.gz"
-    if ! _download_to_file "$url" "$tarball"; then
-        rm -rf "$tmpdir"
-        err "sing-box 下载失败: $url"
-    fi
-    if ! tar zxf "$tarball" --strip-components 1 -C "$tmpdir"; then
-        rm -rf "$tmpdir"
-        err "sing-box 解压失败"
-    fi
-    install_singbox_from_dir "$tmpdir" "$version"
-    rm -rf "$tmpdir"
-}
-
-start_singbox_prefetch() {
-    local bin
-    bin="$(resolve_singbox_bin)"
-    if [ -x "$bin" ]; then
-        SING_BOX_BIN="$bin"
-        return 0
-    fi
-
-    SINGBOX_PREFETCH_DIR="$(mktemp -d)"
-    info "后台下载 sing-box（交互配置时可并行进行）..."
-    (
-        local arch version url tarball
-        arch="$(detect_arch)"
-        version="$(fetch_singbox_latest_version)" || exit 1
-        url="https://github.com/Sagernet/sing-box/releases/download/v${version}/sing-box-${version}-linux-${arch}.tar.gz"
-        tarball="$SINGBOX_PREFETCH_DIR/sing-box.tar.gz"
-        _download_to_file "$url" "$tarball" || exit 1
-        tar zxf "$tarball" --strip-components 1 -C "$SINGBOX_PREFETCH_DIR" || exit 1
-        echo "$version" > "$SINGBOX_PREFETCH_DIR/.version"
-        touch "$SINGBOX_PREFETCH_DIR/.ok"
-    ) &
-    SINGBOX_PREFETCH_PID=$!
-}
-
-finish_singbox_install() {
-    local force="${1:-false}"
-    local bin
-    bin="$(resolve_singbox_bin)"
-
-    if [ "$force" != "true" ] && [ -x "$bin" ] && [ -z "$SINGBOX_PREFETCH_PID" ]; then
-        SING_BOX_BIN="$bin"
-        info "sing-box 已安装: $SING_BOX_BIN"
-        return 0
-    fi
-
-    if [ -n "$SINGBOX_PREFETCH_PID" ]; then
-        wait "$SINGBOX_PREFETCH_PID" || {
-            rm -rf "$SINGBOX_PREFETCH_DIR"
-            err "sing-box 后台下载失败，请检查 GitHub 网络"
-        }
-        if [ -f "$SINGBOX_PREFETCH_DIR/.ok" ]; then
-            install_singbox_from_dir "$SINGBOX_PREFETCH_DIR" "$(cat "$SINGBOX_PREFETCH_DIR/.version")"
-            rm -rf "$SINGBOX_PREFETCH_DIR"
-            SINGBOX_PREFETCH_PID=""
-            return 0
-        fi
-        rm -rf "$SINGBOX_PREFETCH_DIR"
-    fi
-
-    install_singbox_binary_sync "$force"
-}
-
-start_ip_prefetch() {
-    [ -n "${CUSTOM_IP:-}" ] && return 0
-    PREFETCH_IP_FILE="$(mktemp)"
-    (
-        get_public_ip > "$PREFETCH_IP_FILE"
-    ) &
-    IP_PREFETCH_PID=$!
 }
 
 # 检测系统类型
@@ -317,7 +338,7 @@ HY2_PORT=""; HY2_PSK=""
 TUIC_PORT=""; TUIC_UUID=""; TUIC_PSK=""
 REALITY_PORT=""; REALITY_UUID=""; REALITY_PK=""; REALITY_SID=""; REALITY_PUB=""; REALITY_SNI="addons.mozilla.org"
 CUSTOM_IP=""
-SING_BOX_BIN="/usr/bin/sing-box"
+SING_BOX_BIN="/etc/sing-box/bin/sing-box"
 suffix=""
 
 load_state() {
@@ -448,11 +469,6 @@ get_config() {
         REALITY_PORT="$(read_port "请输入 VLESS Reality 端口 (留空随机): ")"
         REALITY_UUID=$(rand_uuid)
     fi
-}
-
-# 安装 sing-box 本体（GitHub 官方 Release，后台预下载 + 直装）
-install_singbox() {
-    finish_singbox_install false
 }
 
 generate_reality_keys() {
@@ -627,19 +643,22 @@ open_firewall_ports() {
 }
 
 get_public_ip() {
-    local ip=""
-    ip=$(download_stream "https://one.one.one.one/cdn-cgi/trace" 2>/dev/null | grep -m1 '^ip=' | cut -d= -f2 || true)
+    if [ -n "$PREFETCH_IP_FILE" ] && [ -f "$PREFETCH_IP_FILE" ]; then
+        cat "$PREFETCH_IP_FILE"
+        return 0
+    fi
+    local ip_line ip=""
+    ip_line="$(_wget -4 -qO- https://one.one.one.one/cdn-cgi/trace 2>/dev/null | grep -m1 '^ip=' || true)"
+    [ -n "$ip_line" ] && ip="${ip_line#ip=}"
     if [ -n "$ip" ] && [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         echo "$ip"
         return 0
     fi
-    for url in "https://api.ipify.org" "https://ifconfig.me" "https://icanhazip.com"; do
-        ip=$(download_stream "$url" 2>/dev/null | tr -d '[:space:]' || true)
-        if [ -n "$ip" ] && [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "$ip"
-            return 0
-        fi
-    done
+    ip="$(_wget -qO- https://api.ipify.org 2>/dev/null | tr -d '[:space:]' || true)"
+    if [ -n "$ip" ] && [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "$ip"
+        return 0
+    fi
     echo "YOUR_SERVER_IP"
 }
 
@@ -668,11 +687,18 @@ main_install() {
     start_ip_prefetch
     get_config
     prompt_node_suffix
+
+    info ">>> [1/6] 安装 sing-box 核心"
     install_singbox
+    info ">>> [2/6] 生成 Reality 密钥"
     generate_reality_keys
+    info ">>> [3/6] 生成 TLS 证书"
     generate_cert
+    info ">>> [4/6] 生成配置文件"
     create_config
+    info ">>> [5/6] 配置系统服务"
     setup_service
+    info ">>> [6/6] 防火墙放行 & 获取公网 IP"
     open_firewall_ports
     resolve_pub_ip
 }
@@ -855,18 +881,20 @@ case "${1:-}" in
     --upgrade-singbox)
         detect_os
         check_root
-        ensure_minimal_tools
-        install_singbox_binary_sync true
+        init_bootstrap
+        install_pkg || exit 1
+        install_singbox_binary_sync
+        bootstrap_cleanup
         exit 0
         ;;
 esac
 
 detect_os
 check_root
-ensure_minimal_tools
 load_state
-start_singbox_prefetch
+bootstrap_start
 
 main_install
 create_sb_panel
 output_format_result
+bootstrap_cleanup
