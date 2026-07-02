@@ -34,6 +34,49 @@ url_encode() {
     printf "%s" "$1" | sed -e 's/%/%25/g' -e 's/:/%3A/g' -e 's/+/%2B/g' -e 's/\//%2F/g' -e 's/=/%3D/g'
 }
 
+validate_port() {
+    local port="$1"
+    [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]
+}
+
+read_port() {
+    local prompt="$1"
+    local value=""
+    while true; do
+        read -r -p "$prompt" value
+        if [ -z "$value" ]; then
+            echo "$(rand_port)"
+            return 0
+        fi
+        if validate_port "$value"; then
+            echo "$value"
+            return 0
+        fi
+        warn "无效端口: $value (请输入 1-65535 之间的数字，或留空随机)"
+    done
+}
+
+clear_protocol_credentials() {
+    SS_PORT=""; SS_PSK=""; SS_METHOD=""
+    HY2_PORT=""; HY2_PSK=""
+    TUIC_PORT=""; TUIC_UUID=""; TUIC_PSK=""
+    REALITY_PORT=""; REALITY_UUID=""
+    REALITY_PK=""; REALITY_SID=""; REALITY_PUB=""
+}
+
+service_cmd() {
+    local action="$1"
+    if [ "$OS" = "alpine" ]; then
+        rc-service sing-box "$action"
+    else
+        systemctl "$action" sing-box
+    fi
+}
+
+resolve_singbox_bin() {
+    command -v sing-box 2>/dev/null || echo "/usr/bin/sing-box"
+}
+
 # 检测系统类型
 detect_os() {
     if [ -f /etc/os-release ]; then
@@ -68,14 +111,12 @@ redhat_install_pkg() {
     fi
 }
 
-detect_os
 check_root() {
     if [ "$(id -u)" != "0" ]; then
         err "此脚本需要 root 权限"
         exit 1
     fi
 }
-check_root
 
 install_deps() {
     info "安装系统依赖..."
@@ -97,31 +138,34 @@ install_deps() {
             ;;
     esac
 }
-install_deps
 
 # -----------------------
 # 加载已有缓存状态
 ENABLE_SS=false; ENABLE_HY2=false; ENABLE_TUIC=false; ENABLE_REALITY=false
-SS_PORT=""; SS_PSK=""; SS_METHOD="2022-blake3-aes-128-gcm"
+SS_PORT=""; SS_PSK=""; SS_METHOD=""
 HY2_PORT=""; HY2_PSK=""
 TUIC_PORT=""; TUIC_UUID=""; TUIC_PSK=""
 REALITY_PORT=""; REALITY_UUID=""; REALITY_PK=""; REALITY_SID=""; REALITY_PUB=""; REALITY_SNI="addons.mozilla.org"
 CUSTOM_IP=""
+SING_BOX_BIN="/usr/bin/sing-box"
+suffix=""
 
-if [ -f "$PROTOCOLS_FILE" ]; then
-    . "$PROTOCOLS_FILE"
-fi
-if [ -f "$CACHE_FILE" ]; then
-    . "$CACHE_FILE"
-fi
+load_state() {
+    if [ -f "$PROTOCOLS_FILE" ]; then
+        # shellcheck disable=SC1090
+        . "$PROTOCOLS_FILE"
+    fi
+    if [ -f "$CACHE_FILE" ]; then
+        # shellcheck disable=SC1090
+        . "$CACHE_FILE"
+    fi
+}
 
 # -----------------------
 # 选择要部署的协议 (支持追加)
 select_protocols() {
     info "=== 协议部署管理 ==="
-    local has_existing=false
     if $ENABLE_SS || $ENABLE_HY2 || $ENABLE_TUIC || $ENABLE_REALITY; then
-        has_existing=true
         warn "检测到当前已安装协议: "
         $ENABLE_SS && echo "  - Shadowsocks"
         $ENABLE_HY2 && echo "  - Hysteria2"
@@ -133,6 +177,7 @@ select_protocols() {
         read -r -p "请选择操作 [1-2] (默认 1): " mode_choice
         if [ "${mode_choice:-1}" = "2" ]; then
             ENABLE_SS=false; ENABLE_HY2=false; ENABLE_TUIC=false; ENABLE_REALITY=false
+            clear_protocol_credentials
         fi
     fi
 
@@ -168,13 +213,11 @@ ENABLE_REALITY=$ENABLE_REALITY
 EOF
 }
 
-select_protocols
-
 # 选择SS加密方式
 select_ss_method() {
-    if ! $ENABLE_SS; return 0; fi
-    if [ -n "${SS_METHOD:-}" ] && [ "$SS_METHOD" != "null" ]; then
-        return 0 # 已有则不重复询问
+    if ! $ENABLE_SS; then return 0; fi
+    if [ -n "${SS_PORT:-}" ] && [ -n "${SS_METHOD:-}" ] && [ "$SS_METHOD" != "null" ]; then
+        return 0 # 已有 SS 配置则不重复询问
     fi
     info "=== 选择 Shadowsocks 加密方式 ==="
     echo "1) 2022-blake3-aes-128-gcm (推荐)"
@@ -188,61 +231,59 @@ select_ss_method() {
         *) SS_METHOD="2022-blake3-aes-128-gcm" ;;
     esac
 }
-select_ss_method
 
-# 询问连接ip和sni配置
-echo ""
-read -r -p "请输入节点连接 IP 或 DDNS 域名 (留空默认自动获取出口 IP): " INPUT_IP
-if [ -n "$INPUT_IP" ]; then
-    CUSTOM_IP="$(echo "$INPUT_IP" | tr -d '[:space:]')"
-fi
+# 询问连接 IP 和 SNI 配置
+prompt_network_settings() {
+    echo ""
+    read -r -p "请输入节点连接 IP 或 DDNS 域名 (留空默认自动获取出口 IP): " INPUT_IP
+    if [ -n "$INPUT_IP" ]; then
+        CUSTOM_IP="$(echo "$INPUT_IP" | tr -d '[:space:]')"
+    fi
 
-if $ENABLE_REALITY && [ "${REALITY_SNI:-addons.mozilla.org}" = "addons.mozilla.org" ]; then
-    read -r -p "请输入 Reality 的 SNI (留空默认 addons.mozilla.org): " INPUT_SNI
-    REALITY_SNI="$(echo "${INPUT_SNI:-addons.mozilla.org}" | tr -d '[:space:]')"
-fi
+    if $ENABLE_REALITY && [ "${REALITY_SNI:-addons.mozilla.org}" = "addons.mozilla.org" ]; then
+        read -r -p "请输入 Reality 的 SNI (留空默认 addons.mozilla.org): " INPUT_SNI
+        REALITY_SNI="$(echo "${INPUT_SNI:-addons.mozilla.org}" | tr -d '[:space:]')"
+    fi
+}
+
+prompt_node_suffix() {
+    if [ ! -f /root/node_names.txt ]; then
+        read -r -p "请输入节点自定义名称后缀 (留空则无后缀): " user_name
+        if [[ -n "$user_name" ]]; then
+            echo "-${user_name}" > /root/node_names.txt
+        else
+            echo "" > /root/node_names.txt
+        fi
+    fi
+    suffix=$(cat /root/node_names.txt 2>/dev/null || echo "")
+}
 
 # 交互端口与密钥
 get_config() {
     info "开始配置端口和密码..."
     if $ENABLE_SS && [ -z "${SS_PORT:-}" ]; then
-        read -r -p "请输入 SS 端口 (留空随机): " UP_SS
-        SS_PORT="${UP_SS:-$(rand_port)}"
+        SS_PORT="$(read_port "请输入 SS 端口 (留空随机): ")"
         SS_PSK=$(rand_pass)
     fi
     if $ENABLE_HY2 && [ -z "${HY2_PORT:-}" ]; then
-        read -r -p "请输入 HY2 端口 (留空随机): " UP_HY2
-        HY2_PORT="${UP_HY2:-$(rand_port)}"
+        HY2_PORT="$(read_port "请输入 HY2 端口 (留空随机): ")"
         HY2_PSK=$(rand_pass)
     fi
     if $ENABLE_TUIC && [ -z "${TUIC_PORT:-}" ]; then
-        read -r -p "请输入 TUIC 端口 (留空随机): " UP_TUIC
-        TUIC_PORT="${UP_TUIC:-$(rand_port)}"
+        TUIC_PORT="$(read_port "请输入 TUIC 端口 (留空随机): ")"
         TUIC_PSK=$(rand_pass)
         TUIC_UUID=$(rand_uuid)
     fi
     if $ENABLE_REALITY && [ -z "${REALITY_PORT:-}" ]; then
-        read -r -p "请输入 VLESS Reality 端口 (留空随机): " UP_R
-        REALITY_PORT="${UP_R:-$(rand_port)}"
+        REALITY_PORT="$(read_port "请输入 VLESS Reality 端口 (留空随机): ")"
         REALITY_UUID=$(rand_uuid)
     fi
 }
-get_config
 
-# 配置节点名称后缀
-if [ ! -f /root/node_names.txt ]; then
-    read -r -p "请输入节点自定义名称后缀 (留空则无后缀): " user_name
-    if [[ -n "$user_name" ]]; then
-        echo "-${user_name}" > /root/node_names.txt
-    else
-        echo "" > /root/node_names.txt
-    fi
-fi
-suffix=$(cat /root/node_names.txt 2>/dev/null || echo "")
-
-# 安装 sing-box本体
+# 安装 sing-box 本体
 install_singbox() {
     if command -v sing-box >/dev/null 2>&1; then
+        SING_BOX_BIN="$(resolve_singbox_bin)"
         return 0
     fi
     info "开始安装 sing-box..."
@@ -257,21 +298,28 @@ install_singbox() {
             err "不支持的系统"; exit 1
             ;;
     esac
+    SING_BOX_BIN="$(resolve_singbox_bin)"
+    if [ ! -x "$SING_BOX_BIN" ]; then
+        err "sing-box 安装后未找到可执行文件: $SING_BOX_BIN"
+        exit 1
+    fi
 }
-install_singbox
 
 generate_reality_keys() {
     if ! $ENABLE_REALITY; then return 0; fi
-    if [ -n "${REALITY_PK:-}" ] && [ -n "${REALITY_PUB:-}" ]; then return 0; fi
+    if [ -n "${REALITY_PK:-}" ] && [ -n "${REALITY_PUB:-}" ] && [ -n "${REALITY_SID:-}" ]; then return 0; fi
     info "生成 Reality 密钥对..."
-    REALITY_KEYS=$(sing-box generate reality-keypair 2>&1)
-    REALITY_PK=$(echo "$REALITY_KEYS" | grep "PrivateKey" | awk '{print $NF}' | tr -d '\r')
-    REALITY_PUB=$(echo "$REALITY_KEYS" | grep "PublicKey" | awk '{print $NF}' | tr -d '\r')
-    REALITY_SID=$(sing-box generate rand 8 --hex 2>&1)
+    REALITY_KEYS=$("$SING_BOX_BIN" generate reality-keypair 2>&1)
+    REALITY_PK=$(echo "$REALITY_KEYS" | awk '/PrivateKey/ {print $NF}' | tr -d '\r')
+    REALITY_PUB=$(echo "$REALITY_KEYS" | awk '/PublicKey/ {print $NF}' | tr -d '\r')
+    REALITY_SID=$("$SING_BOX_BIN" generate rand 8 --hex 2>/dev/null | tr -d '[:space:]')
+    if [ -z "$REALITY_PK" ] || [ -z "$REALITY_PUB" ] || [ -z "$REALITY_SID" ]; then
+        err "Reality 密钥生成失败"
+        exit 1
+    fi
     echo -n "$REALITY_PUB" > /etc/sing-box/.reality_pub
     echo -n "$REALITY_SID" > /etc/sing-box/.reality_sid
 }
-generate_reality_keys
 
 generate_cert() {
     if ! $ENABLE_HY2 && ! $ENABLE_TUIC; then return 0; fi
@@ -283,7 +331,6 @@ generate_cert() {
           -days 3650 -subj "/CN=www.bing.com"
     fi
 }
-generate_cert
 
 # 生成配置文件 (通过高内聚的 JSON 拼接生成)
 create_config() {
@@ -292,6 +339,7 @@ create_config() {
     echo "[]" > "$TEMP_INBOUNDS"
 
     if $ENABLE_SS; then
+        SS_METHOD="${SS_METHOD:-2022-blake3-aes-128-gcm}"
         jq --argjson port "$SS_PORT" --arg method "$SS_METHOD" --arg psk "$SS_PSK" \
         '. += [{ "type": "shadowsocks", "listen": "::", "listen_port": $port, "method": $method, "password": $psk, "tag": "ss-in" }]' \
         "$TEMP_INBOUNDS" > "$TEMP_INBOUNDS.bak" && mv "$TEMP_INBOUNDS.bak" "$TEMP_INBOUNDS"
@@ -321,6 +369,11 @@ create_config() {
     > "$CONFIG_PATH"
     rm -f "$TEMP_INBOUNDS"
 
+    if ! "$SING_BOX_BIN" check -c "$CONFIG_PATH" >/dev/null 2>&1; then
+        err "配置文件校验失败，请检查 jq 生成的 JSON"
+        exit 1
+    fi
+
     # 写缓存
     cat > "$CACHE_FILE" <<EOF
 ENABLE_SS=$ENABLE_SS
@@ -344,19 +397,18 @@ REALITY_SNI=$REALITY_SNI
 CUSTOM_IP=$CUSTOM_IP
 EOF
 }
-create_config
 
 # 守护进程与服务托管
 setup_service() {
     if [ "$OS" = "alpine" ]; then
         SERVICE_PATH="/etc/init.d/sing-box"
-        cat > "$SERVICE_PATH" <<'OPENRC'
+        cat > "$SERVICE_PATH" <<OPENRC
 #!/sbin/openrc-run
 name="sing-box"
 description="Sing-box Proxy Server"
-command="/usr/bin/sing-box"
+command="$SING_BOX_BIN"
 command_args="run -c /etc/sing-box/config.json"
-pidfile="/run/${RC_SVCNAME}.pid"
+pidfile="/run/\${RC_SVCNAME}.pid"
 command_background="yes"
 output_log="/var/log/sing-box.log"
 error_log="/var/log/sing-box.err"
@@ -367,10 +419,10 @@ start_pre() { checkpath --directory --mode 0755 /var/log /run; }
 OPENRC
         chmod +x "$SERVICE_PATH"
         rc-update add sing-box default >/dev/null 2>&1 || true
-        rc-service sing-box restart || exit 1
+        service_cmd restart || exit 1
     else
         SERVICE_PATH="/etc/systemd/system/sing-box.service"
-        cat > "$SERVICE_PATH" <<'SYSTEMD'
+        cat > "$SERVICE_PATH" <<SYSTEMD
 [Unit]
 Description=Sing-box Proxy Server
 After=network.target nss-lookup.target
@@ -380,8 +432,8 @@ Wants=network.target
 Type=simple
 User=root
 WorkingDirectory=/etc/sing-box
-ExecStart=/usr/bin/sing-box run -c /etc/sing-box/config.json
-ExecReload=/bin/kill -HUP $MAINPID
+ExecStart=$SING_BOX_BIN run -c /etc/sing-box/config.json
+ExecReload=/bin/kill -HUP \$MAINPID
 Restart=on-failure
 RestartSec=10s
 LimitNOFILE=1048576
@@ -391,29 +443,38 @@ WantedBy=multi-user.target
 SYSTEMD
         systemctl daemon-reload
         systemctl enable sing-box >/dev/null 2>&1
-        systemctl restart sing-box || exit 1
+        service_cmd restart || exit 1
     fi
 }
-setup_service
 
 # 防火墙端口自动放行
-open_firewalld_for_singbox() {
-    [ "$OS" != "redhat" ] && return 0
-    command -v firewall-cmd >/dev/null 2>&1 || return 0
-    firewall-cmd --state >/dev/null 2>&1 || return 0
-
-    _fw_port() {
+open_firewall_ports() {
+    _fw_port_firewalld() {
         [ -z "$1" ] && return 0
         firewall-cmd --permanent --add-port="${1}/tcp" >/dev/null 2>&1 || true
         firewall-cmd --permanent --add-port="${1}/udp" >/dev/null 2>&1 || true
     }
-    $ENABLE_SS && _fw_port "$SS_PORT"
-    $ENABLE_HY2 && _fw_port "$HY2_PORT"
-    $ENABLE_TUIC && _fw_port "$TUIC_PORT"
-    $ENABLE_REALITY && _fw_port "$REALITY_PORT"
-    firewall-cmd --reload >/dev/null 2>&1 || true
+    _fw_port_ufw() {
+        [ -z "$1" ] && return 0
+        ufw allow "${1}/tcp" >/dev/null 2>&1 || true
+        ufw allow "${1}/udp" >/dev/null 2>&1 || true
+    }
+
+    local ports=()
+    $ENABLE_SS && ports+=("$SS_PORT")
+    $ENABLE_HY2 && ports+=("$HY2_PORT")
+    $ENABLE_TUIC && ports+=("$TUIC_PORT")
+    $ENABLE_REALITY && ports+=("$REALITY_PORT")
+
+    if [ "$OS" = "redhat" ] && command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+        for port in "${ports[@]}"; do _fw_port_firewalld "$port"; done
+        firewall-cmd --reload >/dev/null 2>&1 || true
+        info "firewalld 端口已放行"
+    elif command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "active"; then
+        for port in "${ports[@]}"; do _fw_port_ufw "$port"; done
+        info "ufw 端口已放行"
+    fi
 }
-open_firewalld_for_singbox() { :; } # 引用外置或内嵌
 
 get_public_ip() {
     local ip=""
@@ -426,11 +487,28 @@ get_public_ip() {
     echo "YOUR_SERVER_IP"
 }
 
-if [ -n "${CUSTOM_IP:-}" ]; then
-    PUB_IP="$CUSTOM_IP"
-else
-    PUB_IP=$(get_public_ip)
-fi
+resolve_pub_ip() {
+    if [ -n "${CUSTOM_IP:-}" ]; then
+        PUB_IP="$CUSTOM_IP"
+    else
+        PUB_IP=$(get_public_ip)
+    fi
+}
+
+main_install() {
+    select_protocols
+    select_ss_method
+    prompt_network_settings
+    get_config
+    prompt_node_suffix
+    install_singbox
+    generate_reality_keys
+    generate_cert
+    create_config
+    setup_service
+    open_firewall_ports
+    resolve_pub_ip
+}
 
 # -----------------------
 # 排版优化的数据输出展示
@@ -531,14 +609,12 @@ show_menu() {
 }
 
 action_view() {
-    # 重新载入主安装脚本的格式化输出
     if [ -f /root/install_sing_box.sh ]; then
-        bash /root/install_sing_box.sh <<EOF
-1
-0
-EOF
-    else
+        bash /root/install_sing_box.sh --show-links
+    elif [ -f "$CACHE_FILE" ]; then
         cat "$CACHE_FILE"
+    else
+        err "未找到缓存配置，无法导出节点链接。"
     fi
 }
 
@@ -593,5 +669,25 @@ SB_SCRIPT
     cp "$0" /root/install_sing_box.sh 2>/dev/null || true
 }
 
+# -----------------------
+# 入口
+case "${1:-}" in
+    --show-links)
+        detect_os
+        load_state
+        prompt_node_suffix
+        resolve_pub_ip
+        output_format_result
+        exit 0
+        ;;
+esac
+
+detect_os
+check_root
+install_deps
+load_state
+SING_BOX_BIN="$(resolve_singbox_bin)"
+
+main_install
 create_sb_panel
 output_format_result
