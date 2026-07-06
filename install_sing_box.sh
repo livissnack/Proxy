@@ -600,29 +600,16 @@ create_config() {
     if $ENABLE_ANYTLS; then
         local anytls_cert="${ANYTLS_CERT_PATH:-/etc/sing-box/certs/fullchain.pem}"
         local anytls_key="${ANYTLS_KEY_PATH:-/etc/sing-box/certs/privkey.pem}"
-        items+="${comma}{\"type\":\"anytls\",\"tag\":\"anytls-in\",\"listen\":\"::\",\"listen_port\":${ANYTLS_PORT},\"users\":[{\"password\":\"$(json_escape "$ANYTLS_PSK")\"}],\"tls\":{\"enabled\":true,\"certificate_path\":\"$(json_escape "$anytls_cert")\",\"key_path\":\"$(json_escape "$anytls_key")\"},\"detour\":\"fallback-out\"}"
+        items+="${comma}{\"type\":\"anytls\",\"tag\":\"anytls-in\",\"listen\":\"::\",\"listen_port\":${ANYTLS_PORT},\"users\":[{\"password\":\"$(json_escape "$ANYTLS_PSK")\"}],\"tls\":{\"enabled\":true,\"certificate_path\":\"$(json_escape "$anytls_cert")\",\"key_path\":\"$(json_escape "$anytls_key")\"},\"fallback\":{\"server\":\"www.microsoft.com\",\"server_port\":443}}"
     fi
 
-    if $ENABLE_ANYTLS; then
-        cat > "$CONFIG_PATH" <<EOF
-{
-  "log": { "level": "info", "timestamp": true },
-  "inbounds": [${items}],
-  "outbounds": [
-    { "type": "direct", "tag": "direct-out" },
-    { "type": "direct", "tag": "fallback-out", "override_address": "www.microsoft.com", "override_port": 443 }
-  ]
-}
-EOF
-    else
-        cat > "$CONFIG_PATH" <<EOF
+    cat > "$CONFIG_PATH" <<EOF
 {
   "log": { "level": "info", "timestamp": true },
   "inbounds": [${items}],
   "outbounds": [{ "type": "direct", "tag": "direct-out" }]
 }
 EOF
-    fi
 
     if ! "$SING_BOX_BIN" check -c "$CONFIG_PATH" >/dev/null 2>&1; then
         err "配置文件校验失败，请检查生成的 JSON"
