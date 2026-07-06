@@ -64,8 +64,6 @@ clear_protocol_credentials() {
     REALITY_PK=""; REALITY_SID=""; REALITY_PUB=""
     ANYTLS_PORT=""; ANYTLS_PSK=""
     ANYTLS_CERT_PATH=""; ANYTLS_KEY_PATH=""
-    ANYTLS_FALLBACK_SERVER=""; ANYTLS_FALLBACK_PORT=""
-    ANYTLS_FALLBACK_ACTIVE=false
 }
 
 service_cmd() {
@@ -358,9 +356,6 @@ TUIC_PORT=""; TUIC_UUID=""; TUIC_PSK=""
 REALITY_PORT=""; REALITY_UUID=""; REALITY_PK=""; REALITY_SID=""; REALITY_PUB=""; REALITY_SNI="addons.mozilla.org"
 ANYTLS_PORT=""; ANYTLS_PSK=""
 ANYTLS_CERT_PATH=""; ANYTLS_KEY_PATH=""
-ANYTLS_FALLBACK_SERVER="www.microsoft.com"
-ANYTLS_FALLBACK_PORT="443"
-ANYTLS_FALLBACK_ACTIVE=false
 CUSTOM_IP=""
 SING_BOX_BIN="/etc/sing-box/bin/sing-box"
 suffix=""
@@ -509,35 +504,6 @@ prompt_anytls_cert() {
     fi
 }
 
-# AnyTLS 回落目标配置
-prompt_anytls_fallback() {
-    if ! $ENABLE_ANYTLS; then return 0; fi
-    if [ -f "$CACHE_FILE" ] && grep -q '^ANYTLS_FALLBACK_SERVER=' "$CACHE_FILE" 2>/dev/null; then
-        return 0
-    fi
-    echo ""
-    info "=== AnyTLS 回落配置 ==="
-    echo "非 AnyTLS 流量将回落到指定站点 (端口扫描伪装，需 sing-box 版本支持 fallback 字段)"
-    read -r -p "请输入回落目标域名 (留空默认 www.microsoft.com，输入 none 禁用): " fb_input
-    case "${fb_input:-www.microsoft.com}" in
-        none|NONE|off|OFF)
-            ANYTLS_FALLBACK_SERVER=""
-            ANYTLS_FALLBACK_PORT=""
-            info "已禁用 AnyTLS 回落"
-            ;;
-        "")
-            ANYTLS_FALLBACK_SERVER="www.microsoft.com"
-            ANYTLS_FALLBACK_PORT="443"
-            ;;
-        *)
-            ANYTLS_FALLBACK_SERVER="$(echo "$fb_input" | tr -d '[:space:]')"
-            ANYTLS_FALLBACK_PORT="443"
-            read -r -p "请输入回落目标端口 (留空默认 443): " fb_port
-            ANYTLS_FALLBACK_PORT="${fb_port:-443}"
-            ;;
-    esac
-}
-
 # 交互端口与密钥
 get_config() {
     info "开始配置端口和密码..."
@@ -616,27 +582,24 @@ EOF
 }
 
 anytls_inbound_json() {
-    local use_fallback="${1:-false}"
     local anytls_cert="${ANYTLS_CERT_PATH:-/etc/sing-box/certs/fullchain.pem}"
     local anytls_key="${ANYTLS_KEY_PATH:-/etc/sing-box/certs/privkey.pem}"
     local tls_extra=""
     if [ -z "${ANYTLS_CERT_PATH:-}" ]; then
         tls_extra=",\"server_name\":\"www.bing.com\""
     fi
-    local json
-    json="{\"type\":\"anytls\",\"tag\":\"anytls-in\",\"listen\":\"::\",\"listen_port\":${ANYTLS_PORT},\"users\":[{\"name\":\"anytls\",\"password\":\"$(json_escape "$ANYTLS_PSK")\"}],\"tls\":{\"enabled\":true,\"certificate_path\":\"$(json_escape "$anytls_cert")\",\"key_path\":\"$(json_escape "$anytls_key")\"${tls_extra}"
-    json+="}"
-    if [ "$use_fallback" = "true" ] && [ -n "${ANYTLS_FALLBACK_SERVER:-}" ]; then
-        json="${json%\}},\"fallback\":{\"server\":\"$(json_escape "$ANYTLS_FALLBACK_SERVER")\",\"server_port\":${ANYTLS_FALLBACK_PORT:-443}}}"
-    fi
-    printf '%s' "$json"
+    printf '{"type":"anytls","tag":"anytls-in","listen":"::","listen_port":%s,"users":[{"name":"anytls","password":"%s"}],"tls":{"enabled":true,"certificate_path":"%s","key_path":"%s"%s}}' \
+        "$ANYTLS_PORT" \
+        "$(json_escape "$ANYTLS_PSK")" \
+        "$(json_escape "$anytls_cert")" \
+        "$(json_escape "$anytls_key")" \
+        "$tls_extra"
 }
 
 # 生成配置文件（纯 bash 拼接 JSON，无需 jq）
 create_config() {
     info "生成配置文件: $CONFIG_PATH"
     local items="" comma=""
-    local base_items=""
 
     if $ENABLE_SS; then
         SS_METHOD="${SS_METHOD:-2022-blake3-aes-128-gcm}"
@@ -659,29 +622,11 @@ create_config() {
         comma=","
     fi
 
-    base_items="$items"
-
     if $ENABLE_ANYTLS; then
-        if [ -n "${ANYTLS_FALLBACK_SERVER:-}" ]; then
-            items="${base_items}${comma}$(anytls_inbound_json true)"
-            write_singbox_config "$items"
-            if "$SING_BOX_BIN" check -c "$CONFIG_PATH" >/dev/null 2>&1; then
-                ANYTLS_FALLBACK_ACTIVE=true
-                info "AnyTLS 回落已启用 -> ${ANYTLS_FALLBACK_SERVER}:${ANYTLS_FALLBACK_PORT:-443}"
-            else
-                ANYTLS_FALLBACK_ACTIVE=false
-                warn "当前 sing-box 版本不支持 AnyTLS fallback，已跳过回落配置（升级 sing-box 后可重新配置）"
-                items="${base_items}${comma}$(anytls_inbound_json false)"
-                write_singbox_config "$items"
-            fi
-        else
-            items="${base_items}${comma}$(anytls_inbound_json false)"
-            write_singbox_config "$items"
-            ANYTLS_FALLBACK_ACTIVE=false
-        fi
-    else
-        write_singbox_config "$items"
+        items+="${comma}$(anytls_inbound_json)"
     fi
+
+    write_singbox_config "$items"
 
     if ! "$SING_BOX_BIN" check -c "$CONFIG_PATH" >/dev/null 2>&1; then
         err "配置文件校验失败，请检查生成的 JSON"
@@ -716,9 +661,6 @@ ANYTLS_PORT=$ANYTLS_PORT
 ANYTLS_PSK=$ANYTLS_PSK
 ANYTLS_CERT_PATH=$ANYTLS_CERT_PATH
 ANYTLS_KEY_PATH=$ANYTLS_KEY_PATH
-ANYTLS_FALLBACK_SERVER=$ANYTLS_FALLBACK_SERVER
-ANYTLS_FALLBACK_PORT=$ANYTLS_FALLBACK_PORT
-ANYTLS_FALLBACK_ACTIVE=$ANYTLS_FALLBACK_ACTIVE
 CUSTOM_IP=$CUSTOM_IP
 EOF
 }
@@ -849,7 +791,6 @@ main_install() {
     get_config
     prompt_node_suffix
     prompt_anytls_cert
-    prompt_anytls_fallback
 
     info ">>> [1/6] 安装 sing-box 核心"
     install_singbox
@@ -882,13 +823,7 @@ output_format_result() {
     $ENABLE_HY2 && printf " 🔹 %-12s : 端口 \033[1;33m%-5s\033[0m | 密码 \033[1;36m%s\033[0m\n" "Hysteria2" "$HY2_PORT" "$HY2_PSK"
     $ENABLE_TUIC && printf " 🔹 %-12s : 端口 \033[1;33m%-5s\033[0m | 密码 \033[1;36m%-16s\033[0m | UUID \033[1;36m%s\033[0m\n" "TUIC" "$TUIC_PORT" "$TUIC_PSK" "$TUIC_UUID"
     $ENABLE_REALITY && printf " 🔹 %-12s : 端口 \033[1;33m%-5s\033[0m | SNI  \033[1;36m%-23s\033[0m | UUID \033[1;36m%s\033[0m\n" "VLESS Reality" "$REALITY_PORT" "$REALITY_SNI" "$REALITY_UUID"
-    $ENABLE_ANYTLS && printf " 🔹 %-12s : 端口 \033[1;33m%-5s\033[0m | 密码 \033[1;36m%s\033[0m" "AnyTLS" "$ANYTLS_PORT" "$ANYTLS_PSK"
-    if $ENABLE_ANYTLS && $ANYTLS_FALLBACK_ACTIVE; then
-        printf " | 回落 \033[1;36m%s:%s\033[0m" "$ANYTLS_FALLBACK_SERVER" "${ANYTLS_FALLBACK_PORT:-443}"
-    elif $ENABLE_ANYTLS && [ -n "${ANYTLS_FALLBACK_SERVER:-}" ] && ! $ANYTLS_FALLBACK_ACTIVE; then
-        printf " | 回落 \033[1;33m(当前版本不支持)\033[0m"
-    fi
-    $ENABLE_ANYTLS && echo ""
+    $ENABLE_ANYTLS && printf " 🔹 %-12s : 端口 \033[1;33m%-5s\033[0m | 密码 \033[1;36m%s\033[0m\n" "AnyTLS" "$ANYTLS_PORT" "$ANYTLS_PSK"
     echo ""
 
     echo -e "\033[1;34m[2. 📋 客户端通用节点链接]\033[0m"
