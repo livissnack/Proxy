@@ -292,10 +292,10 @@ bootstrap_cleanup() {
     [ -n "$BOOT_TMPDIR" ] && [ -d "$BOOT_TMPDIR" ] && rm -rf "$BOOT_TMPDIR"
 }
 
-# 确保 /root/install_sing_box.sh 存在（供 sb 面板追加/查看使用）
+# 确保 /root/install_sing_box.sh 存在且为最新版（供 sb 面板追加/查看使用）
 ensure_install_script_backup() {
-    [ -f /root/install_sing_box.sh ] && return 0
     local url="https://raw.githubusercontent.com/livissnack/Proxy/main/install_sing_box.sh"
+    # 强制重新下载覆盖，防止旧的损坏文件残留
     if command -v curl >/dev/null 2>&1; then
         curl -fsSL "$url" -o /root/install_sing_box.sh 2>/dev/null || return 1
     elif command -v wget >/dev/null 2>&1; then
