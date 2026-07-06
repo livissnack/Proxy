@@ -938,7 +938,17 @@ done
 SB_SCRIPT
     chmod +x "$SB_PATH"
     # 将自身备份至 /root 下，保证菜单追加功能在任何时候都能被 sb 唤醒调用
-    cp "$0" /root/install_sing_box.sh 2>/dev/null || true
+    # 注意：仅当 $0 是普通文件时才备份（避免 bash <(curl ...) 时 /dev/fd/xx 被截断）
+    if [ -f "$0" ] && [ -r "$0" ]; then
+        case "$0" in
+            /dev/fd/*|/proc/*/fd/*)
+                : # 进程替换(fd)场景，跳过备份
+                ;;
+            *)
+                cp "$0" /root/install_sing_box.sh 2>/dev/null || true
+                ;;
+        esac
+    fi
 }
 
 # -----------------------
