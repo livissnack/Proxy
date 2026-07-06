@@ -626,6 +626,9 @@ EOF
 
     if ! "$SING_BOX_BIN" check -c "$CONFIG_PATH" >/dev/null 2>&1; then
         err "配置文件校验失败，请检查生成的 JSON"
+        echo "----- sing-box check 详细错误 -----" >&2
+        "$SING_BOX_BIN" check -c "$CONFIG_PATH" >&2
+        echo "-----------------------------------" >&2
         exit 1
     fi
 
