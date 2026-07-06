@@ -62,6 +62,8 @@ clear_protocol_credentials() {
     TUIC_PORT=""; TUIC_UUID=""; TUIC_PSK=""
     REALITY_PORT=""; REALITY_UUID=""
     REALITY_PK=""; REALITY_SID=""; REALITY_PUB=""
+    ANYTLS_PORT=""; ANYTLS_PSK=""
+    ANYTLS_CERT_PATH=""; ANYTLS_KEY_PATH=""
 }
 
 service_cmd() {
@@ -332,11 +334,13 @@ check_root() {
 
 # -----------------------
 # 加载已有缓存状态
-ENABLE_SS=false; ENABLE_HY2=false; ENABLE_TUIC=false; ENABLE_REALITY=false
+ENABLE_SS=false; ENABLE_HY2=false; ENABLE_TUIC=false; ENABLE_REALITY=false; ENABLE_ANYTLS=false
 SS_PORT=""; SS_PSK=""; SS_METHOD=""
 HY2_PORT=""; HY2_PSK=""
 TUIC_PORT=""; TUIC_UUID=""; TUIC_PSK=""
 REALITY_PORT=""; REALITY_UUID=""; REALITY_PK=""; REALITY_SID=""; REALITY_PUB=""; REALITY_SNI="addons.mozilla.org"
+ANYTLS_PORT=""; ANYTLS_PSK=""
+ANYTLS_CERT_PATH=""; ANYTLS_KEY_PATH=""
 CUSTOM_IP=""
 SING_BOX_BIN="/etc/sing-box/bin/sing-box"
 suffix=""
@@ -356,18 +360,19 @@ load_state() {
 # 选择要部署的协议 (支持追加)
 select_protocols() {
     info "=== 协议部署管理 ==="
-    if $ENABLE_SS || $ENABLE_HY2 || $ENABLE_TUIC || $ENABLE_REALITY; then
+    if $ENABLE_SS || $ENABLE_HY2 || $ENABLE_TUIC || $ENABLE_REALITY || $ENABLE_ANYTLS; then
         warn "检测到当前已安装协议: "
         $ENABLE_SS && echo "  - Shadowsocks"
         $ENABLE_HY2 && echo "  - Hysteria2"
         $ENABLE_TUIC && echo "  - TUIC"
         $ENABLE_REALITY && echo "  - VLESS Reality"
+        $ENABLE_ANYTLS && echo "  - AnyTLS"
         echo "--------------------------------"
         echo "1) 追加/修改协议 (保留未勾选的现有协议)"
         echo "2) 全新覆盖安装 (清除所有老协议，重新选择)"
         read -r -p "请选择操作 [1-2] (默认 1): " mode_choice
         if [ "${mode_choice:-1}" = "2" ]; then
-            ENABLE_SS=false; ENABLE_HY2=false; ENABLE_TUIC=false; ENABLE_REALITY=false
+            ENABLE_SS=false; ENABLE_HY2=false; ENABLE_TUIC=false; ENABLE_REALITY=false; ENABLE_ANYTLS=false
             clear_protocol_credentials
         fi
     fi
@@ -377,6 +382,7 @@ select_protocols() {
     echo "2) Hysteria2 (HY2)"
     echo "3) TUIC"
     echo "4) VLESS Reality"
+    echo "5) AnyTLS"
     echo ""
     read -r -p "请输入要安装/保留的协议编号(多个用空格分隔，如 1 2 4): " protocol_input
 
@@ -386,11 +392,12 @@ select_protocols() {
             2) ENABLE_HY2=true ;;
             3) ENABLE_TUIC=true ;;
             4) ENABLE_REALITY=true ;;
+            5) ENABLE_ANYTLS=true ;;
             *) warn "无效选项: $num" ;;
         esac
     done
 
-    if ! $ENABLE_SS && ! $ENABLE_HY2 && ! $ENABLE_TUIC && ! $ENABLE_REALITY; then
+    if ! $ENABLE_SS && ! $ENABLE_HY2 && ! $ENABLE_TUIC && ! $ENABLE_REALITY && ! $ENABLE_ANYTLS; then
         err "未选择任何协议, 退出"
         exit 1
     fi
@@ -401,6 +408,7 @@ ENABLE_SS=$ENABLE_SS
 ENABLE_HY2=$ENABLE_HY2
 ENABLE_TUIC=$ENABLE_TUIC
 ENABLE_REALITY=$ENABLE_REALITY
+ENABLE_ANYTLS=$ENABLE_ANYTLS
 EOF
 }
 
@@ -449,6 +457,39 @@ prompt_node_suffix() {
     suffix=$(cat /root/node_names.txt 2>/dev/null || echo "")
 }
 
+# AnyTLS 自定义证书配置
+prompt_anytls_cert() {
+    if ! $ENABLE_ANYTLS; then return 0; fi
+    if [ -n "${ANYTLS_CERT_PATH:-}" ] && [ -n "${ANYTLS_KEY_PATH:-}" ]; then
+        return 0 # 已有则不重复询问
+    fi
+    echo ""
+    info "=== AnyTLS 证书配置 ==="
+    echo "AnyTLS 推荐使用真实域名 + 合法证书（如 Let's Encrypt / 商业证书）"
+    read -r -p "请输入 AnyTLS 证书 fullchain.pem 路径 (留空则使用自签名证书): " cert_path
+    if [ -n "$cert_path" ]; then
+        ANYTLS_CERT_PATH="$cert_path"
+        read -r -p "请输入 AnyTLS 私钥 privkey.pem 路径 (留空默认与证书同目录): " key_path
+        if [ -n "$key_path" ]; then
+            ANYTLS_KEY_PATH="$key_path"
+        else
+            # 尝试自动推断
+            local dir
+            dir="$(dirname "$cert_path")"
+            if [ -f "$dir/privkey.pem" ]; then
+                ANYTLS_KEY_PATH="$dir/privkey.pem"
+                info "自动使用: $ANYTLS_KEY_PATH"
+            else
+                read -r -p "请输入 AnyTLS 私钥完整路径: " ANYTLS_KEY_PATH
+            fi
+        fi
+    else
+        ANYTLS_CERT_PATH=""
+        ANYTLS_KEY_PATH=""
+        info "AnyTLS 将使用自签名证书 (www.bing.com)"
+    fi
+}
+
 # 交互端口与密钥
 get_config() {
     info "开始配置端口和密码..."
@@ -469,6 +510,10 @@ get_config() {
         REALITY_PORT="$(read_port "请输入 VLESS Reality 端口 (留空随机): ")"
         REALITY_UUID=$(rand_uuid)
     fi
+    if $ENABLE_ANYTLS && [ -z "${ANYTLS_PORT:-}" ]; then
+        ANYTLS_PORT="$(read_port "请输入 AnyTLS 端口 (留空随机): ")"
+        ANYTLS_PSK=$(rand_pass)
+    fi
 }
 
 generate_reality_keys() {
@@ -488,9 +533,18 @@ generate_reality_keys() {
 }
 
 generate_cert() {
-    if ! $ENABLE_HY2 && ! $ENABLE_TUIC; then return 0; fi
+    # AnyTLS 使用自定义证书时，不需要生成自签名
+    local need_selfsigned=false
+    if $ENABLE_HY2 || $ENABLE_TUIC; then
+        need_selfsigned=true
+    fi
+    if $ENABLE_ANYTLS && [ -z "${ANYTLS_CERT_PATH:-}" ]; then
+        need_selfsigned=true
+    fi
+    if ! $need_selfsigned; then return 0; fi
+
     if ! command -v openssl >/dev/null 2>&1; then
-        err "HY2/TUIC 需要 openssl 生成 TLS 证书，请安装 openssl 后重试"
+        err "HY2/TUIC/AnyTLS 需要 openssl 生成 TLS 证书，请安装 openssl 后重试"
         exit 1
     fi
     mkdir -p /etc/sing-box/certs
@@ -525,6 +579,13 @@ create_config() {
 
     if $ENABLE_REALITY; then
         items+="${comma}{\"type\":\"vless\",\"tag\":\"vless-in\",\"listen\":\"::\",\"listen_port\":${REALITY_PORT},\"users\":[{\"uuid\":\"$(json_escape "$REALITY_UUID")\",\"flow\":\"xtls-rprx-vision\"}],\"tls\":{\"enabled\":true,\"server_name\":\"$(json_escape "$REALITY_SNI")\",\"reality\":{\"enabled\":true,\"handshake\":{\"server\":\"$(json_escape "$REALITY_SNI")\",\"server_port\":443},\"private_key\":\"$(json_escape "$REALITY_PK")\",\"short_id\":[\"$(json_escape "$REALITY_SID")\"]}}}"
+        comma=","
+    fi
+
+    if $ENABLE_ANYTLS; then
+        local anytls_cert="${ANYTLS_CERT_PATH:-/etc/sing-box/certs/fullchain.pem}"
+        local anytls_key="${ANYTLS_KEY_PATH:-/etc/sing-box/certs/privkey.pem}"
+        items+="${comma}{\"type\":\"anytls\",\"tag\":\"anytls-in\",\"listen\":\"::\",\"listen_port\":${ANYTLS_PORT},\"users\":[{\"password\":\"$(json_escape "$ANYTLS_PSK")\"}],\"tls\":{\"enabled\":true,\"certificate_path\":\"$(json_escape "$anytls_cert")\",\"key_path\":\"$(json_escape "$anytls_key")\"}}"
     fi
 
     cat > "$CONFIG_PATH" <<EOF
@@ -546,6 +607,7 @@ ENABLE_SS=$ENABLE_SS
 ENABLE_HY2=$ENABLE_HY2
 ENABLE_TUIC=$ENABLE_TUIC
 ENABLE_REALITY=$ENABLE_REALITY
+ENABLE_ANYTLS=$ENABLE_ANYTLS
 SS_PORT=$SS_PORT
 SS_PSK=$SS_PSK
 SS_METHOD=$SS_METHOD
@@ -560,6 +622,10 @@ REALITY_PK=$REALITY_PK
 REALITY_SID=$REALITY_SID
 REALITY_PUB=$REALITY_PUB
 REALITY_SNI=$REALITY_SNI
+ANYTLS_PORT=$ANYTLS_PORT
+ANYTLS_PSK=$ANYTLS_PSK
+ANYTLS_CERT_PATH=$ANYTLS_CERT_PATH
+ANYTLS_KEY_PATH=$ANYTLS_KEY_PATH
 CUSTOM_IP=$CUSTOM_IP
 EOF
 }
@@ -631,6 +697,7 @@ open_firewall_ports() {
     $ENABLE_HY2 && ports+=("$HY2_PORT")
     $ENABLE_TUIC && ports+=("$TUIC_PORT")
     $ENABLE_REALITY && ports+=("$REALITY_PORT")
+    $ENABLE_ANYTLS && ports+=("$ANYTLS_PORT")
 
     if [ "$OS" = "redhat" ] && command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
         for port in "${ports[@]}"; do _fw_port_firewalld "$port"; done
@@ -687,6 +754,7 @@ main_install() {
     start_ip_prefetch
     get_config
     prompt_node_suffix
+    prompt_anytls_cert
 
     info ">>> [1/6] 安装 sing-box 核心"
     install_singbox
@@ -719,6 +787,7 @@ output_format_result() {
     $ENABLE_HY2 && printf " 🔹 %-12s : 端口 \033[1;33m%-5s\033[0m | 密码 \033[1;36m%s\033[0m\n" "Hysteria2" "$HY2_PORT" "$HY2_PSK"
     $ENABLE_TUIC && printf " 🔹 %-12s : 端口 \033[1;33m%-5s\033[0m | 密码 \033[1;36m%-16s\033[0m | UUID \033[1;36m%s\033[0m\n" "TUIC" "$TUIC_PORT" "$TUIC_PSK" "$TUIC_UUID"
     $ENABLE_REALITY && printf " 🔹 %-12s : 端口 \033[1;33m%-5s\033[0m | SNI  \033[1;36m%-23s\033[0m | UUID \033[1;36m%s\033[0m\n" "VLESS Reality" "$REALITY_PORT" "$REALITY_SNI" "$REALITY_UUID"
+    $ENABLE_ANYTLS && printf " 🔹 %-12s : 端口 \033[1;33m%-5s\033[0m | 密码 \033[1;36m%s\033[0m\n" "AnyTLS" "$ANYTLS_PORT" "$ANYTLS_PSK"
     echo ""
 
     echo -e "\033[1;34m[2. 📋 客户端通用节点链接]\033[0m"
@@ -741,6 +810,11 @@ output_format_result() {
     if $ENABLE_REALITY; then
         echo -e " 🟢 \033[1;32mVLESS Reality:\033[0m"
         echo "    vless://${REALITY_UUID}@${host}:${REALITY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SNI}&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}#reality${suffix}"
+    fi
+    if $ENABLE_ANYTLS; then
+        local anytls_encoded=$(url_encode "$ANYTLS_PSK")
+        echo -e " 🟢 \033[1;32mAnyTLS:\033[0m"
+        echo "    anytls://${anytls_encoded}@${host}:${ANYTLS_PORT}/?insecure=1&sni=www.bing.com#anytls${suffix}"
     fi
     echo ""
 
