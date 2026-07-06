@@ -292,6 +292,21 @@ bootstrap_cleanup() {
     [ -n "$BOOT_TMPDIR" ] && [ -d "$BOOT_TMPDIR" ] && rm -rf "$BOOT_TMPDIR"
 }
 
+# 确保 /root/install_sing_box.sh 存在（供 sb 面板追加/查看使用）
+ensure_install_script_backup() {
+    [ -f /root/install_sing_box.sh ] && return 0
+    local url="https://raw.githubusercontent.com/livissnack/Proxy/main/install_sing_box.sh"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$url" -o /root/install_sing_box.sh 2>/dev/null || return 1
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO /root/install_sing_box.sh "$url" 2>/dev/null || return 1
+    else
+        return 1
+    fi
+    chmod +x /root/install_sing_box.sh 2>/dev/null || true
+    return 0
+}
+
 json_escape() {
     local s=$1
     s=${s//\\/\\\\}
@@ -748,6 +763,7 @@ resolve_pub_ip() {
 }
 
 main_install() {
+    ensure_install_script_backup
     select_protocols
     select_ss_method
     prompt_network_settings
@@ -876,7 +892,7 @@ show_menu() {
 }
 
 action_view() {
-    if [ -f /root/install_sing_box.sh ]; then
+    if [ -f /root/install_sing_box.sh ] || ensure_install_script_backup; then
         bash /root/install_sing_box.sh --show-links
     elif [ -f "$CACHE_FILE" ]; then
         cat "$CACHE_FILE"
@@ -886,11 +902,12 @@ action_view() {
 }
 
 action_reconfig() {
-    if [ -f /root/install_sing_box.sh ]; then
+    if [ -f /root/install_sing_box.sh ] || ensure_install_script_backup; then
         clear
         exec bash /root/install_sing_box.sh
     else
         err "未在 /root/install_sing_box.sh 找到原始安装脚本，无法追加协议。"
+        info "请手动执行: curl -fsSL https://raw.githubusercontent.com/livissnack/Proxy/main/install_sing_box.sh -o /root/install_sing_box.sh && chmod +x /root/install_sing_box.sh"
     fi
 }
 
