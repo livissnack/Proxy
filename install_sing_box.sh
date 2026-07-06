@@ -129,11 +129,10 @@ init_bootstrap() {
     [ -n "$PKG_CMD" ] || err "不支持的操作系统 (需 Debian/Ubuntu/CentOS/Alpine 等)"
     [ -n "$IS_SYSTEMD" ] || [ -n "$IS_OPENRC" ] || err "系统缺少 systemctl 或 rc-service，无法托管服务"
 
-    BOOT_TMPDIR="$(mktemp -d 2>/dev/null || echo "/tmp/sb-install-$$")"
+    pick_bootstrap_dir
     TMPCORE="$BOOT_TMPDIR/sing-box.tgz"
     IS_CORE_OK="$BOOT_TMPDIR/sing-box.ok"
     IS_PKG_OK="$BOOT_TMPDIR/pkg.ok"
-    mkdir -p "$BOOT_TMPDIR"
 }
 
 required_pkgs() {
@@ -241,7 +240,7 @@ start_ip_prefetch() {
 }
 
 install_core_from_cache() {
-    local extract_dir version
+    local version
     if [ -x "$(resolve_singbox_bin)" ]; then
         SING_BOX_BIN="$(resolve_singbox_bin)"
         info "sing-box 已安装: $SING_BOX_BIN"
@@ -256,12 +255,14 @@ install_core_from_cache() {
 
     [ -f "$IS_CORE_OK" ] || err "sing-box 安装包不存在，下载可能失败"
 
-    extract_dir="$BOOT_TMPDIR/extract"
-    mkdir -p "$extract_dir" /etc/sing-box/bin
-    tar zxf "$IS_CORE_OK" --strip-components 1 -C "$extract_dir" || err "sing-box 解压失败"
-    [ -x "$extract_dir/sing-box" ] || err "安装包中未找到 sing-box 可执行文件"
+    mkdir -p /etc/sing-box/bin || { disk_err_hint; err "无法创建 /etc/sing-box/bin"; }
+    if ! tar zxf "$IS_CORE_OK" -C /etc/sing-box/bin --strip-components=1 2>/dev/null; then
+        disk_err_hint
+        err "sing-box 解压失败"
+    fi
+    [ -x /etc/sing-box/bin/sing-box ] || err "安装包中未找到 sing-box 可执行文件"
 
-    install -m 755 "$extract_dir/sing-box" /etc/sing-box/bin/sing-box
+    rm -f "$IS_CORE_OK" "$TMPCORE" 2>/dev/null || true
     ln -sf /etc/sing-box/bin/sing-box /usr/local/bin/sing-box 2>/dev/null || true
     ln -sf /etc/sing-box/bin/sing-box /usr/bin/sing-box 2>/dev/null || true
     SING_BOX_BIN="/etc/sing-box/bin/sing-box"
@@ -290,6 +291,40 @@ install_singbox_binary_sync() {
 
 bootstrap_cleanup() {
     [ -n "$BOOT_TMPDIR" ] && [ -d "$BOOT_TMPDIR" ] && rm -rf "$BOOT_TMPDIR"
+}
+
+cleanup_stale_bootstrap_dirs() {
+    local pattern dir
+    for pattern in /tmp/sb-install-* /var/tmp/sb-install-* /etc/sing-box/.tmp/sb-install-* /root/.cache/sb-install-*; do
+        for dir in $pattern; do
+            [ -d "$dir" ] || continue
+            rm -rf "$dir" 2>/dev/null || true
+        done
+    done
+}
+
+disk_err_hint() {
+    echo ""
+    warn "磁盘空间或配额不足，可尝试："
+    echo "  df -h"
+    echo "  rm -rf /tmp/sb-install-* /var/tmp/sb-install-*"
+    echo "  du -sh /tmp /var/tmp /root /etc 2>/dev/null"
+}
+
+pick_bootstrap_dir() {
+    local candidate dir
+    cleanup_stale_bootstrap_dirs
+    for candidate in /etc/sing-box/.tmp /var/tmp /root/.cache /tmp; do
+        dir="${candidate}/sb-install-$$"
+        if mkdir -p "$dir" 2>/dev/null && touch "$dir/.write-test" 2>/dev/null; then
+            rm -f "$dir/.write-test"
+            BOOT_TMPDIR="$dir"
+            return 0
+        fi
+    done
+    disk_err_hint
+    err "无法创建临时目录（磁盘配额已满）"
+    exit 1
 }
 
 # 确保 /root/install_sing_box.sh 存在且为最新版（供 sb 面板追加/查看使用）
